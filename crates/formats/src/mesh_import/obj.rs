@@ -37,8 +37,7 @@ fn read_inner(bytes: &[u8]) -> Result<RawMesh> {
 
     // Polygons stay whole so the wireframe can show them; `RawMesh::polygon` triangulates
     let options = tobj::LoadOptions { single_index: true, triangulate: false, ignore_points: true, ignore_lines: true };
-    let (models, materials) =
-        tobj::load_obj_buf(&mut source, &options, |_| tobj::load_mtl_buf(&mut library.as_bytes())).map_err(|e| malformed(KIND, e))?;
+    let (models, materials) = tobj::load_obj_buf(&mut source, &options, |_| tobj::load_mtl_buf(&mut library.as_bytes())).map_err(|e| malformed(KIND, e))?;
     let materials = materials.unwrap_or_default();
 
     let mut raw = RawMesh::default();
