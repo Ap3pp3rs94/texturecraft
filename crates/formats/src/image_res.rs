@@ -1,6 +1,6 @@
 //! Decoding imported image resources (fills, alphas, stencils).
 
-use crate::{FormatError, MAX_IMAGE_SIZE, Result};
+use crate::{FormatError, MAX_IMAGE_SIZE, MAX_RESOURCE_TEXELS, Result};
 
 /// A decoded image: RGBA as 0..1 floats in the file's own encoding (8/16-bit files stay
 /// sRGB-encoded; `srgb` says so), row-major, top row first.
@@ -15,7 +15,7 @@ pub struct DecodedImage {
 
 /// Decode PNG, JPEG, TGA, TIFF, BMP, WEBP, EXR or HDR bytes.
 pub fn decode_image(bytes: &[u8]) -> Result<DecodedImage> {
-    decode_image_within(bytes, u64::MAX)
+    decode_image_within(bytes, MAX_RESOURCE_TEXELS)
 }
 
 /// [`decode_image`] for an image of at most `max_texels` (width × height), checked from the
@@ -99,5 +99,16 @@ mod tests {
         assert_eq!(decode_image_within(&png, 64).unwrap().width, 8);
         assert!(matches!(decode_image_within(&png, 63), Err(FormatError::TooLarge(_))));
         assert!(decode_image(&png).is_ok());
+    }
+
+    #[test]
+    fn the_default_decoder_refuses_more_than_the_resource_texel_budget_from_the_header() {
+        // An 18-byte TGA header: 16384² is inside the edge limit but far over 64 M texels.
+        let mut header = [0u8; 18];
+        header[2] = 2;
+        header[12..14].copy_from_slice(&16_384u16.to_le_bytes());
+        header[14..16].copy_from_slice(&16_384u16.to_le_bytes());
+        header[16] = 24;
+        assert!(matches!(decode_image(&header), Err(FormatError::TooLarge(_))));
     }
 }

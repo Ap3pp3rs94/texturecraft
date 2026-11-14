@@ -95,6 +95,10 @@ pub(crate) fn guard<T>(kind: &'static str, f: impl FnOnce() -> Result<T>) -> Res
 /// Largest image edge accepted or produced anywhere in this crate.
 pub const MAX_IMAGE_SIZE: u32 = 16_384;
 
+/// Most texels an imported image resource may decode to by default (8192 × 8192).
+/// Larger images are refused from their header before any pixels are decoded.
+pub const MAX_RESOURCE_TEXELS: u64 = 1 << 26;
+
 /// Read a whole file, refusing files over `cap` bytes.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn read_capped(path: &std::path::Path, cap: u64) -> Result<Vec<u8>> {
