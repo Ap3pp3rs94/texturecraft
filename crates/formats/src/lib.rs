@@ -108,15 +108,53 @@ pub(crate) fn read_capped(path: &std::path::Path, cap: u64) -> Result<Vec<u8>> {
     Ok(std::fs::read(path)?)
 }
 
-/// Write `bytes` to `path` atomically: `<path>.tmp` first, then rename over the target.
+/// Create a new temporary file beside `path`, refusing to reuse an existing (possibly symlinked) name.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn create_temp(path: &std::path::Path) -> Result<(std::path::PathBuf, std::fs::File)> {
+    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("out");
+    for attempt in 0..100u32 {
+        let tmp = parent.join(format!(".{name}.{}.{attempt}.tmp", std::process::id()));
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp) {
+            Ok(file) => return Ok((tmp, file)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Err(FormatError::Io(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "could not create a temporary file")))
+}
+
+/// Write `bytes` to `path` atomically: a new temporary file first, then rename over the target.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
-    let tmp = std::path::PathBuf::from(tmp);
-    let res = std::fs::write(&tmp, bytes).and_then(|_| std::fs::rename(&tmp, path));
+    use std::io::Write;
+    let (tmp, mut file) = create_temp(path)?;
+    let res = file.write_all(bytes).and_then(|_| file.sync_all());
+    drop(file);
+    let res = res.and_then(|_| std::fs::rename(&tmp, path));
     if res.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
     Ok(res?)
+}
+
+#[cfg(all(test, unix))]
+mod atomic_tests {
+    use super::write_atomic;
+
+    #[test]
+    fn write_atomic_does_not_follow_a_planted_temp_symlink() -> std::io::Result<()> {
+        let dir = std::env::temp_dir().join(format!("tc-atomic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir)?;
+        let target = dir.join("out.png");
+        let victim = dir.join("victim.txt");
+        std::fs::write(&victim, b"safe")?;
+        std::os::unix::fs::symlink(&victim, dir.join("out.png.tmp"))?;
+        write_atomic(&target, b"new").map_err(std::io::Error::other)?;
+        assert_eq!(std::fs::read(&victim)?, b"safe");
+        assert_eq!(std::fs::read(&target)?, b"new");
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
 }

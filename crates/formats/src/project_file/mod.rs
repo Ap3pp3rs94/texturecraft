@@ -101,11 +101,9 @@ pub fn save_project_bytes(pf: &ProjectFile) -> Result<Vec<u8>> {
 /// Save atomically: `<path>.tmp` first, then rename over `path`.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn save_project(path: &std::path::Path, pf: &ProjectFile) -> Result<()> {
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
-    let tmp = std::path::PathBuf::from(tmp);
+    let (tmp, file) = crate::create_temp(path)?;
     let res = (|| -> Result<()> {
-        let mut file = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
+        let mut file = std::io::BufWriter::new(file);
         write_project(&mut file, pf)?;
         file.into_inner().map_err(|e| e.into_error())?.sync_all()?;
         std::fs::rename(&tmp, path)?;
