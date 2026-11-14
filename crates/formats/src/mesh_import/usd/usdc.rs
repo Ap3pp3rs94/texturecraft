@@ -15,6 +15,9 @@ const MIN_VERSION: (u8, u8, u8) = (0, 4, 0);
 const MAX_SECTIONS: usize = 64;
 /// Items in one table or array.
 const MAX_ITEMS: usize = 1 << 28;
+/// Entries in the PATHS table. The declared count is tiny in the file but each entry is a
+/// materialised path, so it needs its own ceiling as well as the decoded-byte budget.
+const MAX_PATHS: usize = 4_000_000;
 
 /// Spec types.
 const SPEC_ATTRIBUTE: i64 = 1;
@@ -248,7 +251,11 @@ impl<'a> Crate<'a> {
         let index = s.ints(n, 4, budget)?;
         let elements = s.ints(n, 4, budget)?;
         let jumps = s.ints(n, 4, budget)?;
-        budget.take(total.saturating_mul(64))?;
+        if total > MAX_PATHS {
+            return Err(FormatError::TooLarge(format!("the USD path table has {total} entries (limit {MAX_PATHS})")));
+        }
+        // Charge what the vector really allocates, not a guessed 64 bytes per entry.
+        budget.take(total.saturating_mul(std::mem::size_of::<Option<PathEl>>()))?;
         self.paths = vec![None; total];
         let mut work: Vec<(usize, Option<usize>)> = vec![(0, None)];
         let mut steps = 0usize;
