@@ -182,7 +182,8 @@ mod tests {
     #[test]
     fn an_unbounded_map_list_is_refused() {
         let maps: Vec<_> = (0..=MAX_MAPS).map(|_| serde_json::json!({"usage": "baseColor", "file": "maps/baseColor.png"})).collect();
-        let manifest = serde_json::json!({"format": FORMAT, "version": VERSION, "name": "n", "graph": "g", "size": [4, 4], "maps": maps, "source": "source.mcraft"});
+        let manifest =
+            serde_json::json!({"format": FORMAT, "version": VERSION, "name": "n", "graph": "g", "size": [4, 4], "maps": maps, "source": "source.mcraft"});
         let mut z = zip::ZipWriter::new(Cursor::new(Vec::new()));
         let o = zip::write::SimpleFileOptions::default();
         z.start_file("material.json", o).unwrap();
