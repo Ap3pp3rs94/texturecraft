@@ -68,9 +68,8 @@ impl Session {
         self.images.retain(|name, _| self.doc.resources.contains_key(name));
 
         // Linked material packages are resources but cannot be decoded as images
-        let package_suffix = format!(".{}", texturecraft_formats::mcmat::MCRAFT_EXT);
         for (name, bytes) in &self.doc.resources {
-            if self.images.contains_key(name) || name.ends_with(&package_suffix) {
+            if self.images.contains_key(name) || name.ends_with(".mcraft") || name.ends_with(".mcmat") || name.ends_with(".sbs") {
                 continue;
             }
 

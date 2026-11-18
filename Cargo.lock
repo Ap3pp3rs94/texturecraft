@@ -827,9 +827,9 @@ dependencies = [
 [[package]]
 name = "craft-mcmat"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=c376774f15ae7cd3b06a7ac664f01a8645af4b83#c376774f15ae7cd3b06a7ac664f01a8645af4b83"
+source = "git+https://github.com/storytold/craft-libs?rev=b0f25d641840bea1dda99c1e5e0c8db9221bcf28#b0f25d641840bea1dda99c1e5e0c8db9221bcf28"
 dependencies = [
- "craft-zip 0.1.0 (git+https://github.com/storytold/craft-libs?rev=c376774f15ae7cd3b06a7ac664f01a8645af4b83)",
+ "craft-zip 0.1.0 (git+https://github.com/storytold/craft-libs?rev=b0f25d641840bea1dda99c1e5e0c8db9221bcf28)",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -961,6 +961,16 @@ dependencies = [
 name = "craft-zip"
 version = "0.1.0"
 source = "git+https://github.com/storytold/craft-libs?rev=5631e99fe126cffb74c673eb458db04299f2bb9b#5631e99fe126cffb74c673eb458db04299f2bb9b"
+dependencies = [
+ "flate2",
+ "thiserror 2.0.21",
+ "zip",
+]
+
+[[package]]
+name = "craft-zip"
+version = "0.1.0"
+source = "git+https://github.com/storytold/craft-libs?rev=b0f25d641840bea1dda99c1e5e0c8db9221bcf28#b0f25d641840bea1dda99c1e5e0c8db9221bcf28"
 dependencies = [
  "flate2",
  "thiserror 2.0.21",
@@ -4462,6 +4472,7 @@ dependencies = [
  "rustix 1.1.5",
  "serde",
  "serde_json",
+ "tempfile",
  "texturecraft-bake",
  "texturecraft-compose",
  "texturecraft-core",

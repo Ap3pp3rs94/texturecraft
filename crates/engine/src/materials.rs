@@ -769,7 +769,7 @@ pub fn apply_at(s: &mut Session, id: &str, place: Place) -> Result<LayerId> {
 
 impl Place {
     /// From `above` (+ `inside`) or `index` params; the selection by default.
-    pub(crate) fn from_params(p: &serde_json::Value) -> Place {
+    pub fn from_params(p: &serde_json::Value) -> Place {
         match (crate::commands::u64p(p, "above"), crate::commands::u64p(p, "index")) {
             (Some(above), _) => Place::Above(LayerId(above), crate::commands::boolp(p, "inside").unwrap_or(false)),
             (None, Some(i)) => Place::Index(usize::try_from(i).unwrap_or(usize::MAX)),

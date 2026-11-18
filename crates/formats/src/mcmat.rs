@@ -1,127 +1,17 @@
-//! MaterialCraft portable materials (`.mcmat`, read only): a zip with `material.json` (the
-//! manifest: maps by usage, exposed parameters, image inputs, presets), `maps/<usage>.png`
-//! (8-bit sRGB for color usages, 16-bit linear otherwise; OpenGL normals) and the
-//! source package. The shared reader handles the portable container and manifest.
-//!
-//! Also the 16-bit PNG encoder that hands baked mesh maps to MaterialCraft as graph inputs.
-
+//! Validate a procedural MCMAT and encode caller-supplied mesh maps for MaterialCraft.
+use crate::{FormatError, Result};
 use std::io::Cursor;
 
-use serde::Deserialize;
-use texturecraft_core::{LinkParam, LinkPreset};
-
-use crate::{FormatError, Result};
-
-/// The portable material extension.
 pub const MCMAT_EXT: &str = "mcmat";
-/// MaterialCraft's package extension.
 pub const MCRAFT_EXT: &str = "mcraft";
-const VERSION: u32 = 2;
-/// Largest entry read (maps are at most 8192² × 16 bits, compressed).
-const MAX_ENTRY: u64 = 512 << 20;
-/// Most map entries one manifest may name (a material has at most nine usages).
-const MAX_MAPS: usize = 64;
-/// Largest total payload read from one `.mcmat`: maps and source together (audit: TextureCraft #4).
-const MAX_TOTAL: u64 = 1 << 30;
-const KIND: &str = "MaterialCraft material";
 
-#[derive(Clone, Debug, PartialEq, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Manifest {
-    pub format: String,
-    pub version: u32,
-    pub name: String,
-    pub graph: String,
-    pub size: [u32; 2],
-    pub maps: Vec<MapEntry>,
-    #[serde(default)]
-    pub parameters: Vec<LinkParam>,
-    #[serde(default)]
-    pub inputs: Vec<ImageInput>,
-    #[serde(default)]
-    pub presets: Vec<LinkPreset>,
-    pub source: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MapEntry {
-    /// `baseColor`, `normal`, `roughness`, `metallic`, `height`, `ambientOcclusion`, `emissive`,
-    /// `opacity` or `specular`.
-    pub usage: String,
-    pub file: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Deserialize)]
-pub struct ImageInput {
-    pub identifier: String,
-}
-
-/// A read `.mcmat`: the manifest, each map's PNG bytes by usage, the source package.
-#[derive(Clone, Debug)]
-pub struct PortableMaterial {
-    pub manifest: Manifest,
-    pub maps: Vec<(String, Vec<u8>)>,
-    pub source: Vec<u8>,
-}
-
-fn malformed(msg: impl Into<String>) -> FormatError {
-    FormatError::Malformed { kind: KIND, msg: msg.into() }
-}
-
-fn shared_error(error: craft_mcmat::Error) -> FormatError {
-    match error {
-        craft_mcmat::Error::Version(version) => FormatError::Unsupported(format!("{KIND} version {version} (this version reads up to {VERSION})")),
-        craft_mcmat::Error::Limit(message) => malformed(message),
-        craft_mcmat::Error::Archive(ref archive) if archive.is_limit() => FormatError::TooLarge(error.to_string()),
-        other => malformed(other.to_string()),
-    }
-}
-
-/// Read `.mcmat` bytes within TextureCraft's existing per-entry and total payload limits.
-pub fn read_mcmat(bytes: &[u8]) -> Result<PortableMaterial> {
-    let limits = craft_mcmat::Limits {
-        min_version: 0,
-        max_version: VERSION,
-        max_entries: 100_000,
-        max_maps: MAX_MAPS,
-        max_manifest_bytes: MAX_ENTRY,
-        max_entry_bytes: MAX_ENTRY,
-        max_total_bytes: MAX_TOTAL,
-    };
-    let mut archive = craft_mcmat::Material::open(bytes, limits).map_err(shared_error)?;
-    // Consume the JSON values rather than cloning the entire untrusted manifest into a second tree.
-    let parameters = std::mem::take(&mut archive.manifest.parameters)
-        .into_iter()
-        .map(serde_json::from_value)
-        .collect::<std::result::Result<_, _>>()
-        .map_err(|e| malformed(format!("material.json: {e}")))?;
-    let inputs = std::mem::take(&mut archive.manifest.inputs)
-        .into_iter()
-        .map(serde_json::from_value)
-        .collect::<std::result::Result<_, _>>()
-        .map_err(|e| malformed(format!("material.json: {e}")))?;
-    let presets = std::mem::take(&mut archive.manifest.presets)
-        .into_iter()
-        .map(serde_json::from_value)
-        .collect::<std::result::Result<_, _>>()
-        .map_err(|e| malformed(format!("material.json: {e}")))?;
-    let shared = &archive.manifest;
-    let manifest = Manifest {
-        format: shared.format.clone(),
-        version: shared.version,
-        name: shared.name.clone(),
-        graph: shared.graph.clone(),
-        size: shared.size,
-        maps: shared.maps.iter().map(|m| MapEntry { usage: m.usage.clone(), file: m.file.clone() }).collect(),
-        parameters,
-        inputs,
-        presets,
-        source: shared.source.clone(),
-    };
-    let maps = manifest.maps.iter().map(|map| Ok((map.usage.clone(), archive.read(&map.file).map_err(shared_error)?))).collect::<Result<Vec<_>>>()?;
-    let source = archive.read_source().map_err(shared_error)?;
-    Ok(PortableMaterial { manifest, maps, source })
+/// Check the v3 envelope before passing the original bytes to the CLI. SBS evaluation belongs to MaterialCraft.
+pub fn validate_mcmat(bytes: &[u8]) -> Result<()> {
+    craft_mcmat::Material::open(bytes, craft_mcmat::Limits::default()).map(drop).map_err(|err| match err {
+        craft_mcmat::Error::Version(_) => FormatError::Unsupported(err.to_string()),
+        craft_mcmat::Error::Archive(ref archive) if archive.is_limit() => FormatError::TooLarge(err.to_string()),
+        _ => FormatError::Malformed { kind: "MaterialCraft material", msg: err.to_string() },
+    })
 }
 
 /// Whether `bytes` contain a portable material manifest within the ZIP entry limit.
@@ -166,78 +56,18 @@ mod tests {
     use super::*;
     use std::io::Write;
 
-    /// A `.mcmat` as MaterialCraft writes it (see its `formats/src/material.rs`).
-    pub(crate) fn sample(version: u32) -> Vec<u8> {
-        let source = if version >= 2 { "source.sbs" } else { "source.mcraft" };
-        let manifest = serde_json::json!({
-            "format": "craft-material", "version": version, "name": "Brick wall", "graph": "Brick_wall", "size": [4, 4],
-            "maps": [{"usage": "baseColor", "file": "maps/baseColor.png", "colorSpace": "srgb"}],
-            "parameters": [{"id": "wear", "label": "Wear", "default": {"t": "float", "v": 0.5}, "min": 0.0, "max": 1.0, "value": {"t": "float", "v": 0.25}}],
-            "inputs": [{"identifier": "curvature", "kind": "gray"}],
-            "presets": [{"name": "Worn", "values": {"wear": {"t": "float", "v": 1.0}}}],
-            "source": source, "futureField": true
-        });
-        let mut z = zip::ZipWriter::new(Cursor::new(Vec::new()));
-        let o = zip::write::SimpleFileOptions::default();
-        z.start_file("material.json", o).unwrap();
-        z.write_all(manifest.to_string().as_bytes()).unwrap();
-        z.start_file("maps/baseColor.png", o).unwrap();
-        z.write_all(&mesh_map_png(4, 3, &[0.5; 48]).unwrap()).unwrap();
-        z.start_file(source, o).unwrap();
-        z.write_all(b"pkg").unwrap();
-        z.finish().unwrap().into_inner()
-    }
-
     #[test]
-    fn reads_manifest_maps_and_source() {
-        let bytes = sample(1);
-
-        assert!(is_mcmat(&bytes) && !is_mcraft(&bytes));
-        let material = read_mcmat(&bytes).unwrap();
-
-        assert_eq!(material.manifest.graph, "Brick_wall");
-        assert_eq!(material.manifest.parameters[0].id, "wear");
-        assert_eq!(material.manifest.parameters[0].value, serde_json::json!({"t": "float", "v": 0.25}));
-        assert_eq!(material.manifest.presets[0].name, "Worn");
-        assert_eq!(material.manifest.inputs[0].identifier, "curvature");
-        assert_eq!(material.maps[0].0, "baseColor");
-        assert_eq!(crate::decode_image(&material.maps[0].1).unwrap().width, 4);
-        assert_eq!(material.source, b"pkg");
-        let current = read_mcmat(&sample(2)).unwrap();
-        assert_eq!(current.manifest.source, "source.sbs");
-        assert_eq!(current.source, b"pkg");
-        assert!(matches!(read_mcmat(&sample(3)), Err(FormatError::Unsupported(_))));
-        assert!(read_mcmat(b"junk").is_err());
-    }
-
-    #[test]
-    fn recognizes_both_generations_of_source_archive_without_confusing_portable_materials() {
-        for entry in ["package.json", "package.sbs"] {
+    fn recognizes_v3_and_directs_older_authors_to_republish() {
+        let source = craft_mcmat::write(b"<package/>", []).unwrap();
+        assert!(is_mcmat(&source) && !is_mcraft(&source));
+        validate_mcmat(&source).unwrap();
+        for version in [1, 2] {
             let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
-            zip.start_file(entry, zip::write::SimpleFileOptions::default()).unwrap();
-            zip.write_all(b"source").unwrap();
-            let bytes = zip.finish().unwrap().into_inner();
-            assert!(is_mcraft(&bytes), "{entry}");
+            zip.start_file("material.json", zip::write::SimpleFileOptions::default()).unwrap();
+            write!(zip, r#"{{"version":{version}}}"#).unwrap();
+            let err = validate_mcmat(&zip.finish().unwrap().into_inner()).unwrap_err();
+            assert!(err.to_string().contains("Republish"));
         }
-        assert!(!is_mcraft(&sample(2)), "a portable material contains source.sbs too");
-    }
-
-    #[test]
-    fn an_unbounded_map_list_is_refused() {
-        let maps: Vec<_> = (0..=MAX_MAPS).map(|_| serde_json::json!({"usage": "baseColor", "file": "maps/baseColor.png"})).collect();
-        let manifest = serde_json::json!({"format": craft_mcmat::FORMAT, "version": VERSION, "name": "n", "graph": "g", "size": [4, 4], "maps": maps, "source": "source.mcraft"});
-        let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
-        let options = zip::write::SimpleFileOptions::default();
-        archive.start_file("material.json", options).unwrap();
-        archive.write_all(manifest.to_string().as_bytes()).unwrap();
-        archive.start_file("maps/baseColor.png", options).unwrap();
-        archive.write_all(&mesh_map_png(4, 3, &[0.5; 48]).unwrap()).unwrap();
-        archive.start_file("source.mcraft", options).unwrap();
-        archive.write_all(b"pkg").unwrap();
-
-        let result = read_mcmat(&archive.finish().unwrap().into_inner());
-
-        assert!(matches!(result, Err(FormatError::Malformed { .. })));
     }
 
     #[test]

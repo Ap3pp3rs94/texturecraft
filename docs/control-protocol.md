@@ -392,12 +392,7 @@ of a second.
 
 ## MaterialCraft materials
 
-A `.mcmat` portable material (MaterialCraft's format, read here by `formats::mcmat`; the manifest is
-documented in MaterialCraft's `docs/control-protocol.md` § Portable materials) becomes a fill layer
-whose channel sources are its cooked maps and whose `link` (shown by `project.inspect`) holds the
-graph's exposed inputs, presets and image inputs. Both apps use the shared `craft-mcmat` container.
-Versions 1 and 2 are accepted; version 1 contains a legacy JSON `.mcraft` source that current
-MaterialCraft cannot reopen, so its cooked maps remain usable but re-cooking needs a compatible older version.
+A v3 `.mcmat` holds a published SBS graph and its source assets. TextureCraft uses the shared `craft-mcmat` reader and cooks the archive through `materialcraft-cli`. The resulting fill stores its channel textures and the original archive in the project. Its exposed values, presets and mesh-map inputs appear in `project.inspect`. Republish older MCMAT files from their original authoring project.
 
 | Command | Params |
 |---|---|
@@ -405,9 +400,9 @@ MaterialCraft cannot reopen, so its cooked maps remain usable but re-cooking nee
 | `material.link.set` | `{layer?, id, value, cook?: true}`: a number, `[..]`, a bool, `"#rrggbb"` or a typed `{"t", "v"}`; re-cooks unless `cook: false` |
 | `material.link.preset` | `{layer?, name, cook?: true}` |
 | `material.link.cook` | `{layer?}`: re-cook at the texture set's resolution with its baked mesh maps (after a bake or a resize) |
-| `material.link.saveSource` | `{layer?, path}`: the `.mcraft` or `.sbs` source, to open in MaterialCraft |
+| `material.link.saveSource` | `{layer?, path}`: the original linked source with its `.mcmat`, `.mcraft` or `.sbs` extension |
 
-Re-cooks use `materialcraft-cli batch` to open the saved graph by name and run `file.exportMaterial` with its size, values and inputs:
+TextureCraft requests `materialcraft-cli export source.mcmat maps --profile maps --size <pixels>` with repeated `--set` and `--input` arguments. It discovers the published image inputs through `info` when the texture set supplies mesh maps. The executable is resolved from
 `$MATERIALCRAFT_CLI`, else `materialcraft-cli` next to the TextureCraft executable, else on `PATH`
 (the app is `$MATERIALCRAFT` / `materialcraft`). Baked maps feed graph input nodes whose identifier
 matches the map's shared id (`ambientOcclusion`, `curvature`, `thickness`, `position`,

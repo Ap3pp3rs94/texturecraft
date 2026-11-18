@@ -104,12 +104,15 @@ pub struct ResizeJob {
     pub rx: std::sync::mpsc::Receiver<texturecraft_engine::Result<texturecraft_engine::ResizeOutput>>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+mod link_import;
+
 /// A MaterialCraft material re-cooking on a worker thread (one per layer at a time).
 pub struct LinkCook {
     pub layer: texturecraft_engine::core::LayerId,
     /// The parameter values it cooks: a result whose values are no longer the layer's is redone.
     pub values: serde_json::Map<String, Value>,
-    pub rx: std::sync::mpsc::Receiver<texturecraft_engine::Result<Vec<u8>>>,
+    pub rx: std::sync::mpsc::Receiver<texturecraft_engine::Result<texturecraft_engine::link_cmds::CookedMaterial>>,
 }
 
 /// The engine's refusal to paint while a bake shows (translated where it is toasted).
@@ -143,6 +146,8 @@ pub struct TextureCraftApp {
     pub pbr_import: Option<pbr_import::PbrDialog>,
     pub resize: Option<ResizeJob>,
     pub link_cooks: Vec<LinkCook>,
+    #[cfg(not(target_arch = "wasm32"))]
+    link_imports: Vec<link_import::Import>,
     pub thumbs: thumbs::Thumbs,
     /// The Layers panel's thumbnails and folded groups.
     pub layer_panel: layer_panel::LayerPanel,
@@ -232,6 +237,8 @@ impl TextureCraftApp {
             pbr_import: None,
             resize: None,
             link_cooks: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            link_imports: Vec::new(),
             thumbs: thumbs::Thumbs::default(),
             layer_panel: layer_panel::LayerPanel::default(),
             viewport_rect: egui::Rect::NOTHING,
@@ -294,6 +301,13 @@ impl TextureCraftApp {
     /// Run an engine command, reporting errors as toasts. Returns the result on success.
     pub fn run(&mut self, id: &str, params: Value) -> Option<Value> {
         self.ui.prefs.apply_resource_limits();
+        #[cfg(not(target_arch = "wasm32"))]
+        if id == "material.load"
+            && let Some(path) = params.get("path").and_then(Value::as_str)
+            && link_import::is_procedural(path)
+        {
+            return self.start_link_import(path, &params);
+        }
 
         // Going to a saved camera glides there; the control channel and CLI jump straight away
         let glide_from = (id.starts_with("camera.select") || id.starts_with("camera.bookmark")).then_some(self.session.camera);
@@ -397,8 +411,8 @@ impl TextureCraftApp {
                 // The layer is gone (undone, deleted): nothing to show.
                 (_, Err(_)) => {}
                 (Ok(_), Ok(now)) if now != values => self.cook_link(layer),
-                (Ok(bytes), Ok(_)) => {
-                    if let Err(e) = self.session.apply_link_cook(layer, &bytes, true) {
+                (Ok(material), Ok(_)) => {
+                    if let Err(e) = self.session.apply_link_cook(layer, &material, true) {
                         self.toast(e.to_string(), true);
                     }
                 }
@@ -723,6 +737,8 @@ impl eframe::App for TextureCraftApp {
         self.poll_bake(ctx);
         self.poll_resize(ctx);
         self.poll_link_cooks(ctx);
+        #[cfg(not(target_arch = "wasm32"))]
+        self.poll_link_imports(ctx);
         self.thumbs.sync_images(&self.session.images, self.session.revision);
 
         // The library shelf rescans when the window comes back (MaterialCraft may have sent a material)
