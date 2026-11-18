@@ -35,6 +35,7 @@ mod project_recovery;
 mod sample;
 mod solo;
 mod thumbs;
+mod tile_generator;
 mod tool_availability;
 mod tool_settings;
 mod tools;

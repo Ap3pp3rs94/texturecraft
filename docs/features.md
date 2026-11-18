@@ -88,6 +88,11 @@ Everything TextureCraft does today, by area. What's still missing is in [`ROADMA
   the brush's material: the next stroke paints its pattern (colour, metallic, roughness, height),
   fixed to the surface and sized with the brush. A click on a smart material, which is several
   layers, only highlights it; drag it to add its layers.
+- **Import resources:** *File › Import resources...* opens a window: *Add resources* (images and
+  materials), an optional name prefix and a role for each image. Environment images light the scene,
+  and alpha images become the brush alpha. Filter by role or remove selected rows before importing.
+  Failed rows stay in the dialog for retry. Color LUT, post effects and asset-library import are
+  unavailable. The browser imports images straight from its file picker.
 - **Your own library:** right-click a layer or folder, choose *Create smart material*, and it
   appears under *My smart materials*, pixels and images included. *Create smart mask* in the same
   menu saves just the layer's mask (all its effects, painted pixels and images); it appears under
@@ -104,14 +109,23 @@ Everything TextureCraft does today, by area. What's still missing is in [`ROADMA
 ## Files and texture sets
 
 - **Open** glTF/GLB, FBX (binary and ASCII), COLLADA, **USD** (usda, usdc, usdz), **Alembic**,
-  OBJ, PLY and STL, or a built-in mesh; UVs are generated when a mesh has none. A `.gltf`'s buffers
+  OBJ, PLY and STL, or a built-in mesh (the `project.new` command; *File › Open sample project...* opens the
+  material ball); UVs are generated when a mesh has none. A `.gltf`'s buffers
   and images and a loose USD layer's textures are read from its folder and kept in the project.
   Reimport a changed mesh and your painted strokes stay on the surface. The
   `file.changeMesh` command (trusted local command API and the control channel) moves the project onto a different mesh file and keeps its layers.
   **Edit › Project Configuration...** (desktop) does the same from the 3D MESH section: *Select...* picks the
   file, *Reimport mesh* is ticked for you (or tick it alone to read the same file again), OK applies. *Import settings* decides whether painted
   strokes follow the surface (on by default), and PROJECT SETTINGS sets the project's normal map format and
-  lists its UV tiles (read only; Texture Set Settings changes them).
+  shows its UV tiles in the UV workflow tooltip. Edit the tiles in Texture Set Settings.
+  Physical size and color management show the same settings as New project.
+- **File › New project...** opens a setup form with BASIC SETTINGS (*Select...* a mesh file,
+  the project template, the document resolution; Create waits for a mesh) and ADVANCED SETTINGS (normal
+  map format, *Use UV Tile workflow*, *Import cameras*, *Import baked maps*, physical size, color
+  management). The project is named after the mesh file. Settings TextureCraft does not have yet
+  (tangent space per fragment, UV tiles as separate texture sets, turning auto-unwrap off and its
+  options, a custom unit scale, OpenColorIO) are shown disabled with a hint; projects use Legacy color
+  management. In the browser, *Select...* opens the browser's file picker.
 - **UDIM / UV tiles:** detected on import or switched on later, with a resolution per tile (blurs,
   other filters and height-to-normal slopes keep their size in UV space at any tile resolution)
   and one texture per tile on export (`$udim`).

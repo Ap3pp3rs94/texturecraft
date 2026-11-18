@@ -175,9 +175,7 @@ pub fn invoke(app: &mut TextureCraftApp, ctx: &egui::Context, id: &str) {
         return;
     }
 
-    if matches!(id, "ui.newProject" | "file.open" | "file.close" | "project.sample")
-        && crate::windows::ask_to_save(app, crate::state::Unsaved::Command(id.into()))
-    {
+    if matches!(id, "file.open" | "file.close" | "project.sample") && crate::windows::ask_to_save(app, crate::state::Unsaved::Command(id.into())) {
         return;
     }
 
@@ -191,7 +189,7 @@ pub fn invoke(app: &mut TextureCraftApp, ctx: &egui::Context, id: &str) {
     }
 
     match id {
-        "ui.newProject" => app.ui.windows.new_project = true,
+        "ui.newProject" => crate::new_project_advanced::open(app),
         "ui.export" => app.ui.windows.export = true,
         "ui.quit" => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
         #[cfg(not(target_arch = "wasm32"))]
@@ -438,6 +436,9 @@ pub fn shortcuts(app: &mut TextureCraftApp, ctx: &egui::Context) {
             // Its keys are Escape (close) and Enter (OK); a stroke in progress isn't touched
             #[cfg(not(target_arch = "wasm32"))]
             crate::project_config::keys_in(app, input, nothing_focused, popup_open);
+        } else if app.ui.windows.import_resources.is_some() {
+            #[cfg(not(target_arch = "wasm32"))]
+            crate::import_resources::keys_in(app, input, nothing_focused, popup_open);
         } else if !popup_open && app.properties_popup.is_some() && input.consume_key(Modifiers::NONE, Key::Escape) {
             app.properties_popup = None;
         } else if !popup_open && crate::rail_popup::is_visible(app) && input.consume_key(Modifiers::NONE, Key::Escape) {

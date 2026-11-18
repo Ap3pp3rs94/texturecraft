@@ -750,6 +750,46 @@ fn a_live_stroke_releases_the_fields_kept_before_it_started() {
 }
 
 #[test]
+fn cached_stack_tracks_the_images_a_tile_generator_reads() {
+    use std::sync::Arc;
+    use texturecraft_compose::{ImageRes, ImageStore};
+
+    let mut fixture = fixture();
+    let hot_layer = heavy_stack(&mut fixture);
+    let bottom_layer = fixture.project.texture_sets[0].stack[0];
+    let LayerKind::Fill(fill) = &mut fixture.project.layer_mut(bottom_layer).unwrap().kind else { panic!("expected fill") };
+    let mut pattern = Procedural::new(ProceduralKind::TileGenerator);
+    pattern.tile.get_or_insert_with(Box::default).background_image = Some("plate".into());
+    fill.sources.insert(Channel::Roughness, Source::Procedural { pattern, low: [0.0; 3], high: [1.0; 3], ramp: Vec::new() });
+
+    let image_with_value = |value| Arc::new(ImageRes { width: RES, height: RES, rgba: vec![[value; 4]; (RES * RES) as usize], srgb: false });
+    let mut images = ImageStore::default();
+    let baked = Default::default();
+    let tiles = all_tiles(RES, RES);
+    let mut cache = BelowCache::default();
+    cache.set_hot(Some(hot_layer));
+    let mut output = Composite::new(&fixture.project.texture_sets[0].channel_list(), RES);
+
+    for (stage, background) in [("cold", None), ("added", Some(1.0)), ("replaced", Some(0.4))] {
+        if let Some(value) = background {
+            images.insert("plate".into(), image_with_value(value));
+        }
+
+        fixture.pixels.layer_mut(hot_layer, Channel::BaseColor, (RES, RES)).set(5, 5, &[stage.len() as u16, 0, 0, u16::MAX]);
+        let input = inputs(&fixture, 0, &images, &baked);
+        composite_tiles_cached(&input, &mut output, &tiles[..1], Some(&mut cache));
+        assert!(!cache.is_empty(), "{stage}: first tile should be cached");
+        let retained = cache.len() - 1;
+        composite_tiles_cached(&input, &mut output, &tiles[1..], Some(&mut cache));
+        assert_eq!(retained, 0, "{stage}: the layers below are drawn again with the new image");
+
+        let mut expected = Composite::new(&fixture.project.texture_sets[0].channel_list(), RES);
+        composite_tiles(&input, &mut expected, &tiles);
+        assert!(output == expected, "{stage}");
+    }
+}
+
+#[test]
 fn cached_stack_tracks_referenced_images_only() {
     use std::sync::Arc;
     use texturecraft_compose::{ImageRes, ImageStore};

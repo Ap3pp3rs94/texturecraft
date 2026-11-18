@@ -255,8 +255,8 @@ pub fn body(app: &mut TextureCraftApp, ui: &mut Ui) {
     let ctx = ui.ctx().clone();
     let filter = app.ui.shelf_filter.to_lowercase();
     scan_library(app);
-    let all = ShelfEntry::all(app);
-    let paths = crate::shelf_folders::with_every_library(crate::shelf_folders::paths(&all));
+    let all_entries = ShelfEntry::all(app);
+    let paths = crate::shelf_folders::with_every_library(crate::shelf_folders::paths(&all_entries));
 
     // A folder that is gone (its last image removed) shows everything again
     if !paths.iter().any(|path| path.starts_with(&app.ui.shelf_path)) {
@@ -265,12 +265,22 @@ pub fn body(app: &mut TextureCraftApp, ui: &mut Ui) {
 
     let folder = app.ui.shelf_path.clone();
     let picked_tab = app.ui.shelf_tab;
-    let searched: Vec<ShelfEntry> = all.into_iter().filter(|entry| entry.matches(&filter)).collect();
-    let mut applicable = crate::shelf_folders::paths(searched.iter().filter(|entry| crate::shelf_tabs::shows(picked_tab, entry.tab())));
-    let matching: Vec<ShelfEntry> = searched.into_iter().filter(|entry| entry.in_folder(&folder)).collect();
+    let mut matching: Vec<ShelfEntry> = all_entries.into_iter().filter(|entry| entry.matches(&filter)).collect();
+    let path_pane_open = app.ui.shelf_panes.filter_by_path;
+    let mut applicable = if path_pane_open {
+        crate::shelf_folders::paths(matching.iter().filter(|entry| crate::shelf_tabs::shows(picked_tab, entry.tab())))
+    } else {
+        Vec::new()
+    };
+
+    // All libraries includes every result without constructing an asset path
+    if !folder.is_empty() {
+        matching.retain(|entry| entry.in_folder(&folder));
+    }
+
     let mut counts: Vec<usize> = TABS.iter().map(|(tab, _, _)| matching.iter().filter(|entry| entry.tab() == *tab).count()).collect();
 
-    // Saved smart materials list under the grid rather than as tiles, so they count apart
+    // Saved smart materials and masks count toward their tabs even without tiles
     let in_user_library = folder.len() <= 1 && folder.first().is_none_or(|library| library == crate::shelf_entry::USER);
     let saved_materials_matching = saved_matching(app, &filter, false);
     let saved_masks_matching = saved_matching(app, &filter, true);
@@ -278,7 +288,7 @@ pub fn body(app: &mut TextureCraftApp, ui: &mut Ui) {
         if in_user_library && let Some(count) = TABS.iter().position(|(shown, _, _)| *shown == tab).and_then(|position| counts.get_mut(position)) {
             *count += saved;
         }
-        if saved > 0 && crate::shelf_tabs::shows(picked_tab, tab) {
+        if path_pane_open && saved > 0 && crate::shelf_tabs::shows(picked_tab, tab) {
             applicable.push(vec![crate::shelf_entry::USER.to_string()]);
         }
     }
@@ -508,7 +518,7 @@ fn entry_tile(app: &mut TextureCraftApp, ui: &mut Ui, ctx: &egui::Context, entry
     let response = tile_in_view(
         ui,
         &mut app.thumbs,
-        texture.as_ref(),
+        |_, _| texture,
         |thumbs| match entry {
             ShelfEntry::SavedBrush { path: Some(path), .. } => Some(thumbs.saved_brush_preview(path, &session.images)),
             _ => entry.preview(session),
@@ -554,7 +564,7 @@ fn entry_tile(app: &mut TextureCraftApp, ui: &mut Ui, ctx: &egui::Context, entry
 pub(crate) fn tile(
     ui: &mut Ui,
     thumbs: &mut Thumbs,
-    texture: Option<&egui::TextureHandle>,
+    texture: impl FnOnce(&Ui, &mut Thumbs) -> Option<egui::TextureHandle>,
     preview: impl FnOnce() -> ShelfPreview,
     label: &str,
     drag: Option<&Asset>,
@@ -566,7 +576,7 @@ pub(crate) fn tile(
 fn tile_in_view(
     ui: &mut Ui,
     thumbs: &mut Thumbs,
-    texture: Option<&egui::TextureHandle>,
+    texture: impl FnOnce(&Ui, &mut Thumbs) -> Option<egui::TextureHandle>,
     preview: impl FnOnce(&mut Thumbs) -> Option<ShelfPreview>,
     label: &str,
     drag: Option<&Asset>,
@@ -576,6 +586,7 @@ fn tile_in_view(
     let sense = if drag.is_some() { Sense::click_and_drag() } else { Sense::click() };
     let (rect, response) = ui.allocate_exact_size(view.tile_size(ui.available_width()), sense);
     response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
+    let texture = if ui.is_rect_visible(rect) { texture(ui, thumbs) } else { None };
     if let Some(asset) = drag
         && response.drag_started()
     {
@@ -588,7 +599,7 @@ fn tile_in_view(
     }
 
     let image_rect = view.thumbnail_rect(rect);
-    thumbnail(painter, texture, image_rect, &tokens);
+    thumbnail(painter, texture.as_ref(), image_rect, &tokens);
     if view.name_beside() {
         let left = image_rect.right() + crate::shelf_view::LIST_NAME_GAP;
         let galley = painter.layout_job(one_line(label, rect.right() - left - LABEL_MARGIN, tokens.text));
@@ -599,7 +610,7 @@ fn tile_in_view(
     }
 
     let big = if response.hovered() { preview(thumbs).and_then(|preview| big_preview(ui, thumbs, || preview)) } else { None };
-    response.on_hover_ui(|ui| hover_preview(ui, texture, big.as_ref(), label))
+    response.on_hover_ui(|ui| hover_preview(ui, texture.as_ref(), big.as_ref(), label))
 }
 
 /// Three light, dark-rimmed dots at the thumbnail's bottom-right corner: the asset includes randomness

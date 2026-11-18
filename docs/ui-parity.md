@@ -61,6 +61,14 @@ The relevant implementations are [layer rows, menus and fill/brush editors](../c
 |---|---|---|---|
 | UI-12 | Generator depth and property coverage | **UI + source.** The picker contains seven kinds. Switching to Position, changing Global balance and duplicating the effect worked. Shared global adjustments, resolution and input slots already exist; that does not establish the richer generator/control inventory in [#374](https://github.com/storytold/texturecraft/issues/374) | Audit each generator's inputs, micro-detail behavior and controls against the reference; do not count seven shared implementations as equivalent to its whole catalog |
 | UI-13 | Narrow workspace readability | **UI.** At 1280 × 800 the app rendered, both views stayed visible and the toolbar exposed scroll arrows. Layer names/types became heavily truncated, the layer toolbar wrapped, and Properties needed scrolling. This was not an input-failure or docking-persistence test | Repeat the editing tasks at smaller sizes, widen/rearrange panels, check full-name tooltips and keyboard access, and retain the layout after restart. Since then: the Layers toolbar stays on one row at 1280 × 800 (its channel box shrinks), and a cut-short layer name or type shows in full on hover. Properties scrolling and restart persistence are unchanged |
+| UI-14 | Assets panel filters | **UI + source.** The type dropdown lists the reference entries in its order, Fonts and Show all included. Saved searches and Filter by path are separate scrollable panes with a divider that supports pointer and keyboard resizing and saves its position with the UI state ([#640](https://github.com/storytold/texturecraft/issues/640)). Fonts, the built-in saved searches Favorites, 3D Assets and Flattened layers, and the System fonts and User fonts libraries are listed but greyed with "Not available yet" | Give fonts, favorites, 3D assets and flattened layers real assets, then enable those rows and check that each one filters the grid |
+
+File > Import resources ([#638](https://github.com/storytold/texturecraft/issues/638)) queues
+images and materials for the open project. Images support a name prefix and a usage. Texture
+and undefined usages store the image, while environment and alpha also apply it to the scene
+or brush. Filter the list by usage or remove rows before importing. Color LUT, post effects
+and asset-library import remain unavailable. The browser imports images straight from its file
+picker.
 
 Broader properties/filter work remains tracked in
 [#433](https://github.com/storytold/texturecraft/issues/433). Its individual rows need checking
@@ -73,7 +81,7 @@ list, not a feature-completion denominator.
 
 | Check | Surface | Result | Observable evidence / limit |
 |---|---|---|---|
-| F01 New project | UI | Pass | Ctrl+N, built-in Cube, 1024 px, Create produced a new project with one empty paint layer. The native mesh-file selection path was not completed in this deeper pass |
+| F01 New project | UI | Pass (tests) | The window no longer offers built-in meshes ([#636](https://github.com/storytold/texturecraft/issues/636)). `tests/it/new_project_window.rs` covers the section order, the defaults, the disabled settings and their hint, Create waiting for a mesh file, and a UV tile project created from a mesh file. A manual pass with the native file picker is still to do |
 | F02 Paint in 3D | UI | Pass | A mouse drag produced a visible stroke in 3D and its UV representation; inspection showed a Paint stroke undo step and painted tiles |
 | F03 Paint in 2D | UI | Pass | A separate UV-view drag increased painted tiles from 7 to 21 per active channel and changed the visible image |
 | F04 Undo and redo | UI | Pass | Ctrl+Z restored 7 tiles and history depth 2; Ctrl+Y restored 21 tiles and depth 3 |

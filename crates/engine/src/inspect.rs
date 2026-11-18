@@ -7,15 +7,24 @@ use texturecraft_core::{Effect, EffectKind, Fill, Filter, Generator, Layer, Laye
 use crate::Session;
 use crate::session::StackTarget;
 
-fn source_json(s: &Source) -> Value {
-    match s {
-        Source::Uniform(v) => json!({ "uniform": v }),
-        Source::Procedural { pattern, low, high, ramp } => with_ramp(
-            json!({
+fn source_json(source: &Source) -> Value {
+    match source {
+        Source::Uniform(value) => json!({ "uniform": value }),
+        Source::Procedural { pattern, low, high, ramp } => {
+            let mut report = json!({
                 "procedural": pattern.kind.label(), "scale": pattern.scale, "seed": pattern.seed, "contrast": pattern.contrast, "low": low, "high": high
-            }),
-            ramp,
-        ),
+            });
+
+            if !pattern.resolution.is_default() {
+                report["resolution"] =
+                    json!({ "mode": format!("{:?}", pattern.resolution.mode), "custom": pattern.resolution.custom, "factor": pattern.resolution.factor });
+            }
+            if let Some(tile) = &pattern.tile {
+                report["tile"] = crate::procedural_params::tile_report(tile);
+            }
+
+            with_ramp(report, ramp)
+        }
         Source::Image { name, normal_format: NormalFormat::OpenGl } => json!({ "image": name }),
         Source::Image { name, normal_format: NormalFormat::DirectX } => json!({ "image": name, "normalFormat": "directX" }),
         Source::Anchor { anchor, channel, ramp } => with_ramp(json!({ "anchor": anchor.0, "channel": channel.id() }), ramp),

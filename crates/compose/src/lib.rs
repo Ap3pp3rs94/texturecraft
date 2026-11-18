@@ -16,9 +16,12 @@ pub mod eval;
 mod held_fields;
 mod image_identity;
 pub mod pattern;
+mod pattern_context;
 pub mod solo;
 pub mod store;
 pub mod thumb;
+mod tile_pattern;
+mod tile_random_stream;
 
 pub use below::{BelowCache, StackKey};
 pub use display::{DisplayKind, kinds_for, tile_bytes};
@@ -26,6 +29,7 @@ pub use eval::{
     BLOCK, Composite, Inputs, MASK_CHANNEL, PaintTarget, Stencil, StrokePreview, all_tiles, composite_tiles, composite_tiles_cached, covered_tiles,
     effect_histogram, flatten_layer, mask_at, mask_image, mask_texels, mask_values, pad_tiles, stack_reads_neighbours,
 };
+pub use pattern_context::PatternContext;
 pub use solo::solo_project;
 pub use store::{BakedMaps, ImageRes, ImageStore, PixelStore};
 pub use thumb::{THUMB_TEXELS, ThumbImage, ThumbTarget};

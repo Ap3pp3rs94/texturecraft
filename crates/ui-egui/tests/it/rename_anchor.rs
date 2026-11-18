@@ -199,13 +199,18 @@ fn a_fill_on_a_higher_layer_reads_a_mask_anchor_added_in_the_interface() {
     h.run_steps(3);
     assert!(matches!(reader_source(&h, high), Source::Uniform(_)), "a new fill starts as a uniform value");
 
-    // Its source picker lists the anchor of the layer below
-    h.get_all_by_role(Role::ComboBox).find(|n| n.value().as_deref() == Some("Uniform value")).unwrap().scroll_to_me();
+    // The Anchor points tab lists the mask anchor of the layer below
+    h.get_by_role_and_label(Role::ComboBox, "Grayscale").scroll_to_me();
     h.run_steps(30);
-    h.get_all_by_role(Role::ComboBox).find(|n| n.value().as_deref() == Some("Uniform value")).unwrap().click();
-    h.run_steps(2);
-    h.get_by_label_contains("Anchor: Low / mask /").click();
+    h.get_by_role_and_label(Role::ComboBox, "Grayscale").click();
     h.run_steps(3);
+    h.get_by_role_and_label(Role::Tab, "Anchor points").click();
+    h.run_steps(3);
+
+    let label = format!("Low / mask / {}", effect_name(&h, anchor));
+    h.get_by_role_and_label(Role::Button, &label).click();
+    h.run_steps(3);
+
     let Source::Anchor { anchor: read, .. } = reader_source(&h, high) else { panic!("the fill reads an anchor: {:?}", reader_source(&h, high)) };
     assert_eq!(read.0, anchor, "the fill reads the anchor of Low");
 

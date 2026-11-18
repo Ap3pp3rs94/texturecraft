@@ -545,6 +545,24 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn an_overflowing_shelf_split_still_allows_saving_other_preferences() {
+        let defaults = UiState::default();
+        let mut saved = serde_json::to_value(&defaults).unwrap();
+        saved["shelf_panes_split"] = serde_json::json!(1e100);
+        let mut storage = MemoryStorage::default();
+        storage.values.insert(STORAGE_KEY.to_owned(), saved.to_string());
+
+        let mut store = UiStateStore::default();
+        let mut ui = store.load(Some(&storage)).expect("settings load with both panes closed");
+        ui.shelf_filter = "rust".to_owned();
+        store.save(&ui, &mut storage);
+
+        let restarted = UiStateStore::default().load(Some(&storage)).unwrap();
+        assert_eq!(restarted.shelf_filter, "rust");
+        assert_eq!(restarted.shelf_panes_split, defaults.shelf_panes_split);
+    }
+
+    #[test]
     fn rejected_storage_backup_preserves_the_unreadable_original() {
         let mut storage = MemoryStorage::default();
         storage.values.insert(STORAGE_KEY.into(), "not json".into());

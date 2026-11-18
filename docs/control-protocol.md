@@ -55,6 +55,12 @@ as the history reaches); `edit.history` lists the steps done and the undone ones
 Any command takes `merge: true` to fold its edit into the previous undo step when that step has
 the same label: a drag that applies a value on every frame stays one step.
 
+A colour param is `[r, g, b]` in linear 0..1, or `"#rrggbb"` in sRGB, which is converted to
+linear. The same digits are two different colours: `"#c8102e"` is `[0.578, 0.005, 0.027]`, while
+`[0.784, 0.063, 0.180]` (its hex digits over 255) paints the lighter `#e54776`. Pass a colour from
+a design tool or a brand guide as hex. A single number is a linear grey.
+For a colour selection, `effect.set` accepts only linear `[r, g, b]` arrays in its `colors` list.
+
 `tool.cloneSource {uv: [u, v]}` (or `{x, y}` for a point on the mesh, or `{clear: true}`) sets the
 Clone tool's source. The source belongs to the active texture set: selecting another texture set
 (`textureSet.select`, or `layer.select` of a layer in another set) clears it. `tool.brush
@@ -496,7 +502,11 @@ view, Alt+Shift+left drag orbits in 90° steps.
 
 ## MaterialCraft materials
 
-A v3 `.mcmat` holds a published SBS graph and its source assets. TextureCraft uses the shared `craft-mcmat` reader and cooks the archive through `materialcraft-cli`. The resulting fill stores its channel textures and the original archive in the project. Its exposed values, presets and mesh-map inputs appear in `project.inspect`. Republish older MCMAT files from their original authoring project.
+A v3 `.mcmat` holds a published SBS graph and its source assets. TextureCraft uses the shared `craft-mcmat` reader and cooks the archive through `materialcraft-cli`. The resulting fill stores its channel textures and the original archive in the project. Linked cooks use the Settings percentage of available RAM. A cook that exceeds the estimated budget reports the required and configured byte counts without replacing the current fill. Its exposed values, presets and mesh-map inputs appear in `project.inspect`. Republish older MCMAT files from their original authoring project. Procedural imports and re-cooks require the desktop CLI. Saved projects retain their baked maps for use in the browser.
+
+Saving and linked cooks share one reservation for the configured RAM allowance. Autosave waits
+until a cook releases the reservation. An explicit save or cook that conflicts with the other
+operation returns a busy error and can be retried.
 
 | Command | Params |
 |---|---|

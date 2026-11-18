@@ -7,10 +7,12 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+mod angle_dial;
 mod ask;
 mod bake_job;
 pub mod bake_mode;
 mod bake_scene;
+mod color_management;
 mod color_selection_editor;
 pub mod control;
 mod decal_drop;
@@ -19,13 +21,18 @@ pub mod docking;
 pub mod export_templates;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod file_dialogs;
+mod fill_source_slot;
+mod fill_source_target;
 mod filter_slot;
 pub mod fonts;
 mod generator_panel;
 pub mod gpu;
+mod gray_slider;
 mod grid_tile;
 pub mod i18n;
 pub mod id_color_pick;
+#[cfg(not(target_arch = "wasm32"))]
+mod import_resources;
 mod inactive_set_hint;
 pub mod keymap;
 pub mod layer_panel;
@@ -49,6 +56,8 @@ mod orb_shape;
 pub mod parity;
 mod path_hit;
 mod path_surface_cache;
+mod pattern_panel;
+mod pattern_target;
 pub mod pbr_import;
 mod preview_image;
 mod preview_request;
@@ -56,11 +65,17 @@ mod preview_worker;
 pub mod profile;
 #[cfg(not(target_arch = "wasm32"))]
 mod project_config;
+pub mod project_form;
 pub mod properties_popup;
 mod rail_popup;
 pub mod render_mode;
+mod resource_panel;
 mod resource_picker;
+mod resource_picker_anchor;
+mod resource_picker_choice;
 mod resource_picker_item;
+mod resource_picker_tab;
+mod resource_picker_tile;
 mod running_bake;
 pub mod saved_search;
 mod screen_color_pick;
@@ -80,6 +95,7 @@ mod surface_paint_point;
 pub mod symmetry;
 pub mod theme;
 pub mod thumbs;
+mod tile_edits;
 pub mod titlebar;
 pub mod toolbar;
 pub mod ui_state_store;
@@ -118,15 +134,27 @@ pub struct ResizeJob {
     pub rx: std::sync::mpsc::Receiver<texturecraft_engine::Result<texturecraft_engine::ResizeOutput>>,
 }
 
+mod link_bake_input;
 #[cfg(not(target_arch = "wasm32"))]
 mod link_import;
 
 /// A MaterialCraft material re-cooking on a worker thread (one per layer at a time).
 pub struct LinkCook {
     pub layer: texturecraft_engine::core::LayerId,
+    project: u64,
+    mesh: u64,
+    size: u32,
+    baked_inputs: Vec<link_bake_input::LinkBakeInput>,
+    canceled: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// The parameter values it cooks: a result whose values are no longer the layer's is redone.
     pub values: serde_json::Map<String, Value>,
     pub rx: std::sync::mpsc::Receiver<texturecraft_engine::Result<texturecraft_engine::link_cmds::CookedMaterial>>,
+}
+
+impl Drop for LinkCook {
+    fn drop(&mut self) {
+        self.canceled.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 /// The engine's refusal to paint while a bake shows (translated where it is toasted).
@@ -342,7 +370,7 @@ impl TextureCraftApp {
         if id == "material.load"
             && self.session.project_open
             && let Some(path) = params.get("path").and_then(Value::as_str)
-            && link_import::is_procedural(path)
+            && texturecraft_engine::link_cmds::is_link_file(std::path::Path::new(path))
         {
             return self.start_link_import(path, &params);
         }
@@ -363,6 +391,7 @@ impl TextureCraftApp {
                     self.resize = None;
                     #[cfg(not(target_arch = "wasm32"))]
                     self.link_imports.clear();
+                    self.link_cooks.clear();
                     self.layer_panel = Default::default();
                 }
 
@@ -449,11 +478,37 @@ impl TextureCraftApp {
         if self.link_cooks.iter().any(|c| c.layer == layer) {
             return;
         }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        if !self.link_imports.is_empty() || !self.link_cooks.is_empty() {
+            self.toast("Another MaterialCraft cook is still running", true);
+            return;
+        }
+
+        self.ui.prefs.apply_resource_limits();
         match self.session.link_job(layer, &serde_json::Map::new()) {
             Ok(job) => {
+                let baked = self.session.doc.project.locate(layer).and_then(|(set, _, _)| self.session.baked(set));
+                let baked_inputs = job
+                    .input_identifiers
+                    .iter()
+                    .filter_map(|identifier| texturecraft_engine::core::BakedMap::parse(identifier))
+                    .map(|map| link_bake_input::LinkBakeInput::capture(map, baked))
+                    .collect();
                 let values = job.values.clone();
+                let size = job.size;
+                let canceled = std::sync::Arc::clone(&job.canceled);
                 let rx = spawn_worker("texturecraft-link", move || job.run());
-                self.link_cooks.push(LinkCook { layer, values, rx });
+                self.link_cooks.push(LinkCook {
+                    layer,
+                    project: self.session.project_id,
+                    mesh: self.session.mesh_id,
+                    size,
+                    baked_inputs,
+                    canceled,
+                    values,
+                    rx,
+                });
             }
             Err(e) => self.toast(e.to_string(), true),
         }
@@ -463,25 +518,43 @@ impl TextureCraftApp {
         if self.link_cooks.is_empty() {
             return;
         }
+
         ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        if self.session.stroke_active() {
+            return;
+        }
+
+        self.link_cooks.retain(|cook| {
+            cook.project == self.session.project_id && cook.mesh == self.session.mesh_id && self.session.doc.project.locate(cook.layer).is_some()
+        });
         let mut done = Vec::new();
         self.link_cooks.retain(|c| match c.rx.try_recv() {
             Err(std::sync::mpsc::TryRecvError::Empty) => true,
-            Ok(r) => {
-                done.push((c.layer, c.values.clone(), r));
+            Ok(result) => {
+                let Some((set, _, _)) = self.session.doc.project.locate(c.layer) else {
+                    return false;
+                };
+
+                let resized = self.session.doc.project.texture_set(set).is_ok_and(|set| set.resolution != c.size);
+                let baked = self.session.baked(set);
+                let stale = resized || c.baked_inputs.iter().any(|input| !input.is_current(baked));
+                done.push((c.layer, c.values.clone(), stale, result));
                 false
             }
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                done.push((c.layer, c.values.clone(), Err(texturecraft_engine::EngineError::Other("the MaterialCraft cook stopped".into()))));
+                done.push((c.layer, c.values.clone(), false, Err(texturecraft_engine::EngineError::Other("the MaterialCraft cook stopped".into()))));
                 false
             }
         });
-        for (layer, values, result) in done {
+        for (layer, values, stale, result) in done {
             let current = self.session.link_values(layer);
             match (result, current) {
-                // The layer is gone (undone, deleted): nothing to show.
+                // The layer can disappear while a cook is pending
                 (_, Err(_)) => {}
-                (Ok(_), Ok(now)) if now != values => self.cook_link(layer),
+                (result, Ok(now)) if now != values || stale => {
+                    drop(result);
+                    self.cook_link(layer);
+                }
                 (Ok(material), Ok(_)) => {
                     if let Err(e) = self.session.apply_link_cook(layer, &material, true) {
                         self.toast(e.to_string(), true);
@@ -712,6 +785,10 @@ impl TextureCraftApp {
             return;
         }
 
+        let Some(mut reservation) = texturecraft_engine::formats::RamReservation::try_for_save() else {
+            return;
+        };
+
         self.next_autosave = now + period;
         let dir = user_dir("autosave");
         let path = dir.join(format!(
@@ -719,11 +796,13 @@ impl TextureCraftApp {
             texturecraft_engine::formats::export::sanitize_file_stem(&self.session.doc.project.name),
             texturecraft_engine::core::PROJECT_EXT
         ));
-        let pf = self.session.project_file();
+        let snapshot = self.session.project_snapshot();
         let spawned = std::thread::Builder::new().name("texturecraft-autosave".into()).spawn(move || {
-            let result = std::fs::create_dir_all(&dir)
-                .map_err(|e| e.to_string())
-                .and_then(|_| texturecraft_engine::formats::save_project(&path, &pf).map_err(|e| e.to_string()));
+            let result =
+                std::fs::create_dir_all(&dir).map_err(|e| e.to_string()).and_then(|_| reservation.save(&path, &snapshot).map_err(|error| error.to_string()));
+            drop(snapshot);
+            drop(reservation);
+
             match result {
                 Ok(()) => log::info!("autosaved {}", path.display()),
                 Err(e) => log::warn!("autosave to {} failed: {e}", path.display()),
@@ -890,6 +969,7 @@ impl eframe::App for TextureCraftApp {
                 toolbar::rail(self, ui);
             }
         }
+
         let hide_ui = self.ui.hide_ui;
         let tokens = theme::Tokens::get(&ctx);
 
@@ -897,6 +977,10 @@ impl eframe::App for TextureCraftApp {
         let panel_frame = if hide_ui { egui::Frame::NONE.fill(tokens.viewport) } else { egui::Frame::NONE.fill(tokens.chrome).inner_margin(theme::GUTTER) };
         egui::CentralPanel::default().frame(panel_frame).show(ui, |ui| if hide_ui { viewport::central(self, ui) } else { docking::show(self, ui) });
         windows::show(self, &ctx);
+
+        // Finish after the dock and windows have requested their thumbnails
+        self.layer_panel.end(&ctx, &self.session);
+
         #[cfg(not(target_arch = "wasm32"))]
         updates_ui::show(self, &ctx);
         toasts(self, &ctx);

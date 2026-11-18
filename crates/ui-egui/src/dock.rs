@@ -6,8 +6,8 @@ use egui_phosphor::regular as ic;
 use serde_json::{Value, json};
 use texturecraft_engine::compose::ThumbTarget;
 use texturecraft_engine::core::{
-    BakedMap, BlendMode, Channel, ChannelBlend, Decal, DecalFlip, Effect, EffectKind, Fill, Filter, Layer, LayerId, LayerKind, LinkParam, MaterialLink,
-    ProceduralKind, Projection, Source,
+    BakedMap, BlendMode, Channel, ChannelBlend, ChannelKind, Decal, DecalFlip, Effect, EffectKind, Fill, Filter, Layer, LayerId, LayerKind, LinkParam,
+    MaterialLink, Projection, Source,
 };
 use texturecraft_engine::filter_lib::scalar_params;
 use texturecraft_engine::paint::alpha_params::MAX_ALPHA_CONTRAST;
@@ -15,6 +15,7 @@ use texturecraft_engine::paint::{BrushAlpha, BrushSettings, alphas};
 use texturecraft_engine::{CloneFrom, StackTarget, Tool};
 
 use crate::TextureCraftApp;
+use crate::filter_slot::SLOT_HEIGHT;
 use crate::i18n::{n_, tr, trf};
 use crate::layer_panel::{effect_preview_size, effect_row_height, layer_preview_size, layer_row_height};
 use crate::shelf::{Asset, ShelfDrag};
@@ -239,7 +240,6 @@ pub(crate) fn layers(app: &mut TextureCraftApp, ui: &mut Ui) {
             ui.painter().line_segment([rect.left_top(), rect.right_top()], Stroke::new(2.0, tokens.accent));
         }
     });
-    app.layer_panel.end(ui.ctx(), &app.session);
     select_all_layers(app, ui);
 }
 
@@ -1703,7 +1703,9 @@ mod image_menu_tests {
 
         let creation_context = eframe::CreationContext::_new_kittest(egui::Context::default());
         let app = TextureCraftApp::new(&creation_context, session);
-        Ok(Harness::builder().with_size(egui::vec2(320.0, 400.0)).with_context_setup(crate::theme::install).build_ui_state(
+
+        // Translated menu labels may need fonts this preview-cache test does not load
+        Ok(Harness::builder().with_size(egui::vec2(320.0, 400.0)).with_context_setup(crate::theme::install).allow_missing_glyphs().build_ui_state(
             |ui, (app, picked)| {
                 if let Some(name) = image_menu(app, ui) {
                     *picked = Some(name);
@@ -2688,13 +2690,13 @@ fn link_param_editor(ui: &mut Ui, layer: LayerId, p: &LinkParam) -> Option<Value
     }
 }
 
-/// `base` with the fields of `extra` added.
-fn with(base: &Value, extra: Value) -> Value {
-    let mut v = base.clone();
-    if let (Some(o), Value::Object(e)) = (v.as_object_mut(), extra) {
-        o.extend(e);
+/// `base` with the fields of `extra` added
+pub(crate) fn with(base: &Value, extra: Value) -> Value {
+    let mut params = base.clone();
+    if let (Some(fields), Value::Object(extra)) = (params.as_object_mut(), extra) {
+        fields.extend(extra);
     }
-    v
+    params
 }
 
 /// Anchor points below layer `reader` in its texture set: (effect id, "layer / anchor" label).
@@ -2737,7 +2739,7 @@ pub(crate) fn effect_anchors_below(app: &TextureCraftApp, layer: LayerId, effect
 }
 
 /// Whether anchor point `anchor` sits in a mask (it then records the mask's gray, whatever the channel).
-fn anchor_in_mask(app: &TextureCraftApp, anchor: LayerId) -> bool {
+pub(crate) fn anchor_in_mask(app: &TextureCraftApp, anchor: LayerId) -> bool {
     let project = &app.session.doc.project;
     project
         .effect(anchor)
@@ -2976,9 +2978,9 @@ fn decal_editor(app: &mut TextureCraftApp, ui: &mut Ui, d: &Decal, base: &Value,
 }
 
 /// The decal's mirrored copy on the other side of the mesh: the axis it is mirrored across and how its image is flipped
-fn decal_symmetry_editor(app: &mut TextureCraftApp, ui: &mut Ui, d: &Decal, base: &Value) {
+fn decal_symmetry_editor(app: &mut TextureCraftApp, ui: &mut Ui, decal: &Decal, base: &Value) {
     let axes = ["X", "Y", "Z"];
-    let axis = d.symmetry.map(|symmetry| usize::from(symmetry.axis));
+    let axis = decal.symmetry.map(|symmetry| usize::from(symmetry.axis));
     let mut picked = None;
     combo(ui, tr("Mirror across"), axis.and_then(|axis| axes.get(axis).copied()).unwrap_or_else(|| tr("Off")), |ui| {
         if ui.selectable_label(axis.is_none(), tr("Off")).clicked() && axis.is_some() {
@@ -2991,7 +2993,7 @@ fn decal_symmetry_editor(app: &mut TextureCraftApp, ui: &mut Ui, d: &Decal, base
         }
     });
 
-    if let Some(symmetry) = d.symmetry {
+    if let Some(symmetry) = decal.symmetry {
         let flips = [(DecalFlip::None, tr("None"), "none"), (DecalFlip::U, "U", "u"), (DecalFlip::V, "V", "v")];
         let current = flips.iter().find(|flip| flip.0 == symmetry.flip).map_or("", |flip| flip.1);
         combo(ui, tr("Flip the copy's image"), current, |ui| {
@@ -3003,7 +3005,7 @@ fn decal_symmetry_editor(app: &mut TextureCraftApp, ui: &mut Ui, d: &Decal, base
         });
     }
 
-    if let Some(symmetry) = d.symmetry {
+    if let Some(symmetry) = decal.symmetry {
         // The plane moves within the mesh, as the symmetry popup's axis position does
         let (lo, hi) = app.session.mesh.bounds();
         let limit = ((hi - lo) * 0.5)[usize::from(symmetry.axis.min(2))];
@@ -3018,135 +3020,105 @@ fn decal_symmetry_editor(app: &mut TextureCraftApp, ui: &mut Ui, d: &Decal, base
     }
 }
 
-/// The source of one fill channel: uniform, procedural, image or anchor.
-fn fill_channel(app: &mut TextureCraftApp, ui: &mut Ui, fill: &Fill, base: &Value, c: Channel, anchors: &[(LayerId, String)], salt: &str) {
-    let tk = Tokens::get(ui.ctx());
-    use texturecraft_engine::core::ChannelKind;
-    {
-        let set = |extra: Value| with(base, with(&json!({"channel": c.id()}), extra));
-        let group = ui.group(|ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(tr(c.label())).strong());
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.menu_button(RichText::new(ic::DOTS_THREE).size(13.0), |ui| {
-                        if ui.button(tr("Uniform value")).clicked() {
-                            app.run("layer.fill.set", set(json!({"value": c.default_value()})));
-                            ui.close();
-                        }
-                        if c.kind() == ChannelKind::Color {
-                            gradient_map_item(app, ui, &fill.source(c), &set);
-                        }
-                        ui.separator();
-                        for k in ProceduralKind::ALL {
-                            if ui.button(tr(k.label())).clicked() {
-                                let (lo, hi) = match c {
-                                    Channel::BaseColor => ([0.15, 0.15, 0.15], [0.85, 0.85, 0.85]),
-                                    Channel::Height => ([-0.05; 3], [0.05; 3]),
-                                    _ => ([0.2; 3], [0.8; 3]),
-                                };
-                                app.run("layer.fill.set", set(json!({"procedural": k.label(), "low": lo, "high": hi})));
-                                ui.close();
-                            }
-                        }
-                        ui.separator();
-                        if let Some(name) = image_menu(app, ui) {
-                            app.run("layer.fill.set", set(json!({"image": name})));
-                        }
-                        if let Some(a) = anchor_entries(ui, anchors, fill.source(c).anchor()) {
-                            app.run("layer.fill.set", set(json!({"anchor": a.0})));
-                            ui.close();
-                        }
-                    })
+/// Space a fill channel's color swatch leaves at the group's right edge
+const CHANNEL_SWATCH_MARGIN: f32 = 4.0;
+/// Width of a pattern's low and high swatches
+const PATTERN_RANGE_SWATCH_WIDTH: f32 = 60.0;
+/// Size of the gradient map menu icon beside the fill source slot
+const FILL_CHANNEL_MENU_ICON_SIZE: f32 = 13.0;
+const GRADIENT_MAP_HINT: &str = n_("Colors the procedural or anchor from dark to light through color stops");
+
+/// The source slot, source settings and gradient map of one fill channel
+fn fill_channel(app: &mut TextureCraftApp, ui: &mut Ui, fill: &Fill, base: &Value, channel: Channel, anchors: &[(LayerId, String)], salt: &str) {
+    let tokens = Tokens::get(ui.ctx());
+    let set = |extra: Value| with(base, with(&json!({"channel": channel.id()}), extra));
+    let default_source = Source::uniform_of(channel);
+    let source = fill.sources.get(&channel).unwrap_or(&default_source);
+    let is_color = channel.kind() == ChannelKind::Color;
+    let group = ui.group(|ui| {
+        let slot = crate::fill_source_target::FillSourceTarget::Channel { base: base.clone(), channel };
+        if is_color {
+            ui.allocate_ui_with_layout(vec2(ui.available_width(), SLOT_HEIGHT), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.menu_button(RichText::new(ic::DOTS_THREE).size(FILL_CHANNEL_MENU_ICON_SIZE), |ui| gradient_map_item(app, ui, source, &set))
                     .response
-                    .on_hover_text(tr("Channel source: uniform value, procedural, image or anchor"));
+                    .on_hover_text(tr(GRADIENT_MAP_HINT));
+                ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                    crate::fill_source_slot::show(app, ui, &slot, source, (anchors, tr(channel.label())));
                 });
             });
-            let ramp = fill.source(c).ramp().to_vec();
-            match fill.source(c) {
-                Source::Uniform(mut v) => {
-                    if c.kind() == ChannelKind::Color {
-                        if color_swatch(ui, &format!("fill_{salt}_{}", c.id()), &mut v, ui.available_width() - 4.0) {
-                            app.run("layer.fill.set", set(json!({"color": v})));
-                        }
-                    } else {
-                        let range = if c.kind() == ChannelKind::Signed { -1.0..=1.0 } else { 0.0..=1.0 };
-                        if let Some(merge) = slider_edit(ui, tr("Value"), &mut v[0], range, 2) {
-                            app.run("layer.fill.set", set(json!({"value": v[0], "merge": merge})));
-                        }
-                    }
-                }
-                Source::Procedural { pattern, low, high, .. } => {
-                    ui.label(
-                        RichText::new(trf(
-                            "{pattern} (scale {scale}, seed {seed})",
-                            &[("pattern", &tr(pattern.kind.label())), ("scale", &format!("{:.1}", pattern.scale)), ("seed", &pattern.seed)],
-                        ))
-                        .color(tk.text_dim),
-                    );
-                    let mut s = pattern.scale;
-                    let mut con = pattern.contrast;
-                    let r1 = slider_edit(ui, tr("Pattern scale"), &mut s, 0.1..=100.0, 1);
-                    let r2 = slider_edit(ui, tr("Contrast"), &mut con, 0.0..=8.0, 2);
-                    let mut seed = pattern.seed as f32;
-                    let r3 = slider_edit(ui, tr("Seed"), &mut seed, 0.0..=999.0, 0);
-                    if let Some(merge) = r1.or(r2).or(r3) {
-                        app.run(
-                            "layer.fill.set",
-                            set(json!({"procedural": pattern.kind.label(), "scale": s, "contrast": con, "seed": seed as u64, "low": low, "high": high, "merge": merge})),
-                        );
-                    }
-                    if c.kind() == ChannelKind::Color && ramp.is_empty() {
-                        let (mut lo, mut hi) = (low, high);
-                        let mut changed = false;
-                        ui.horizontal(|ui| {
-                            ui.label(tr("Low"));
-                            changed |= color_swatch(ui, &format!("lo_{salt}_{}", c.id()), &mut lo, 60.0);
-                            ui.label(tr("High"));
-                            changed |= color_swatch(ui, &format!("hi_{salt}_{}", c.id()), &mut hi, 60.0);
-                        });
-                        if changed {
-                            app.run(
-                                "layer.fill.set",
-                                set(json!({"procedural": pattern.kind.label(), "scale": s, "contrast": con, "seed": pattern.seed, "low": lo, "high": hi})),
-                            );
-                        }
-                    }
-                }
-                Source::Image { name, normal_format } => {
-                    ui.label(trf("Image: {name}", &[("name", &name)]));
-                    if c.kind() == ChannelKind::NormalMap {
-                        let mut directx = normal_format == texturecraft_engine::core::NormalFormat::DirectX;
-                        if ui
-                            .checkbox(&mut directx, tr("DirectX normal map"))
-                            .on_hover_text(tr("Flips the image's green channel, for normal maps made with Y pointing down"))
-                            .changed()
-                        {
-                            app.run("layer.fill.set", set(json!({"normalFormat": if directx { "directX" } else { "openGl" }})));
-                        }
-                    }
-                }
-                Source::Anchor { anchor, channel, .. } => {
-                    ui.label(RichText::new(anchor_label(app, anchor, channel)).color(tk.text_dim));
-                }
-            }
-            if c.kind() == ChannelKind::Color && !ramp.is_empty() {
-                ramp_editor(app, ui, &ramp, &format!("ramp_{salt}_{}", c.id()), &set);
-            }
-        });
-
-        // A shelf image dropped on the channel becomes its source
-        if let Some(name) = image_drop(ui, &group.response.interact(Sense::hover())) {
-            app.run("layer.fill.set", set(json!({"image": name})));
+        } else {
+            crate::fill_source_slot::show(app, ui, &slot, source, (anchors, tr(channel.label())));
         }
+
+        match source {
+            Source::Uniform(value) if is_color => {
+                let mut value = *value;
+                if color_swatch(ui, &format!("fill_{salt}_{}", channel.id()), &mut value, ui.available_width() - CHANNEL_SWATCH_MARGIN) {
+                    app.run("layer.fill.set", set(json!({"color": value})));
+                }
+            }
+            Source::Uniform(value) => {
+                let mut value = value[0];
+                let range = if channel.kind() == ChannelKind::Signed { -1.0..=1.0 } else { 0.0..=1.0 };
+                if let Some(merge) = slider_edit(ui, tr("Value"), &mut value, range, 2) {
+                    app.run("layer.fill.set", set(json!({"value": value, "merge": merge})));
+                }
+            }
+            Source::Procedural { pattern, low, high, ramp } => {
+                let target = crate::pattern_target::PatternTarget {
+                    command: "layer.fill.set",
+                    base: with(base, json!({"channel": channel.id(), "low": low, "high": high})),
+                    salt: format!("{salt}_{}", channel.id()),
+                };
+                crate::pattern_panel::pattern_properties(app, ui, &target, pattern);
+                if is_color && ramp.is_empty() {
+                    let (mut low, mut high) = (*low, *high);
+                    let mut changed = false;
+                    ui.horizontal(|ui| {
+                        ui.label(tr("Low"));
+                        changed |= color_swatch(ui, &format!("lo_{salt}_{}", channel.id()), &mut low, PATTERN_RANGE_SWATCH_WIDTH);
+                        ui.label(tr("High"));
+                        changed |= color_swatch(ui, &format!("hi_{salt}_{}", channel.id()), &mut high, PATTERN_RANGE_SWATCH_WIDTH);
+                    });
+                    if changed {
+                        crate::pattern_panel::send(app, &target, pattern, json!({"low": low, "high": high}));
+                    }
+                }
+            }
+            Source::Image { name, normal_format } => {
+                ui.label(trf("Image: {name}", &[("name", name)]));
+                if channel.kind() == ChannelKind::NormalMap {
+                    let mut directx = *normal_format == texturecraft_engine::core::NormalFormat::DirectX;
+                    let toggle = ui
+                        .checkbox(&mut directx, tr("DirectX normal map"))
+                        .on_hover_text(tr("Flips the image's green channel, for normal maps made with Y pointing down"));
+                    if toggle.changed() {
+                        app.run("layer.fill.set", set(json!({"normalFormat": if directx { "directX" } else { "openGl" }})));
+                    }
+                }
+            }
+            Source::Anchor { anchor, channel: anchored, .. } => {
+                ui.label(RichText::new(anchor_label(app, *anchor, *anchored)).color(tokens.text_dim));
+            }
+        }
+
+        if is_color && !source.ramp().is_empty() {
+            ramp_editor(app, ui, source.ramp(), &format!("ramp_{salt}_{}", channel.id()), &set);
+        }
+    });
+
+    // A shelf image dropped on the channel becomes its source
+    if let Some(name) = image_drop(ui, &group.response.interact(Sense::hover())) {
+        app.run("layer.fill.set", set(json!({"image": name})));
     }
 }
 
-/// The Gradient Map item of a color channel's source menu: turns the color stops of its
+/// The Gradient Map item beside a color channel's source slot: turns the color stops of its
 /// procedural (starting from its low and high, so the look holds) or anchor on, or off.
 fn gradient_map_item(app: &mut TextureCraftApp, ui: &mut Ui, source: &Source, set: &impl Fn(Value) -> Value) {
     let can = matches!(source, Source::Procedural { .. } | Source::Anchor { .. });
     let on = !source.ramp().is_empty();
-    let hint = tr("Colors the procedural or anchor from dark to light through color stops");
+    let hint = tr(GRADIENT_MAP_HINT);
     let item = ui.add_enabled_ui(can, |ui| ui.selectable_label(on, tr("Gradient Map"))).inner;
     if item.on_hover_text(hint).on_disabled_hover_text(hint).clicked() {
         let params = if on { json!({ "colors": [] }) } else { json!({ "gradientMap": true }) };
@@ -3198,26 +3170,11 @@ fn effect_properties(app: &mut TextureCraftApp, ui: &mut Ui, layer: &Layer, effe
         EffectKind::Fill { source, projection } => {
             ui.label(caption(tr("Fill")));
             let anchors = effect_anchors_below(app, layer.id, effect_id);
-            let current = match source {
-                Source::Anchor { anchor, channel, .. } => anchor_label(app, *anchor, *channel),
-                Source::Uniform(_) => tr("Uniform value").to_string(),
-                Source::Procedural { pattern, .. } => tr(pattern.kind.label()).to_string(),
-                Source::Image { name, .. } => trf("Image: {name}", &[("name", name)]),
-            };
-            let source_response = combo(ui, tr("Source"), current, |ui| {
-                if ui.selectable_label(matches!(source, Source::Uniform(_)), tr("Uniform value")).clicked() {
-                    app.run("effect.set", json!({"effect": id, "value": 1.0}));
-                }
-                if let Some(anchor) = anchor_entries(ui, &anchors, source.anchor()) {
-                    app.run("effect.set", json!({"effect": id, "anchor": anchor.0}));
-                }
-                if let Some(name) = image_menu(app, ui) {
-                    app.run("effect.set", json!({"effect": id, "image": name}));
-                }
-            });
+            let target = crate::fill_source_target::FillSourceTarget::Mask { effect: id };
+            let slot = ui.scope(|ui| crate::fill_source_slot::show(app, ui, &target, source, (&anchors, tr("Grayscale")))).response;
 
-            // The source selector accepts image drops from the Assets panel
-            if let Some(name) = image_drop(ui, &source_response.interact(Sense::hover())) {
+            // The slot accepts image drops from the Assets panel
+            if let Some(name) = image_drop(ui, &slot.interact(Sense::hover())) {
                 app.run("effect.set", json!({"effect": id, "image": name}));
             }
 
@@ -3227,6 +3184,10 @@ fn effect_properties(app: &mut TextureCraftApp, ui: &mut Ui, layer: &Layer, effe
                     if let Some(merge) = slider_edit(ui, tr("Value"), &mut value, 0.0..=1.0, 2) {
                         app.run("effect.set", json!({"effect": id, "value": value, "merge": merge}));
                     }
+                }
+                Source::Procedural { pattern, .. } => {
+                    let target = crate::pattern_target::PatternTarget { command: "effect.set", base: json!({"effect": id}), salt: format!("mask_fill_{id}") };
+                    crate::pattern_panel::pattern_properties(app, ui, &target, pattern);
                 }
                 Source::Anchor { anchor, .. } if anchor_in_mask(app, *anchor) => {
                     let note = if mask_anchor_enabled(app, *anchor) == Some(false) { tr("Off") } else { tr("A mask anchor reads as its mask's gray.") };
@@ -3250,7 +3211,6 @@ fn effect_properties(app: &mut TextureCraftApp, ui: &mut Ui, layer: &Layer, effe
                         projection_editor(app, ui, projection, "effect.set", &json!({"effect": id}), &format!("maskfill{id}"));
                     }
                 }
-                _ => {}
             }
             if anchors.is_empty() {
                 ui.label(RichText::new(tr("Add an anchor point to a layer below to use its stack as a mask.")).color(tokens.text_dim));

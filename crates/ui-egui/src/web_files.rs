@@ -46,6 +46,8 @@ enum Pick {
     Cage(u64),
     /// Export dialog › Output templates: an export template (`.json`).
     ExportPreset,
+    /// New project › 3D mesh › Select...: the mesh the project is created from.
+    NewProjectMesh(u64),
 }
 
 /// Files picked in the browser, waiting for the next frame: (file name, bytes, purpose).
@@ -70,13 +72,23 @@ fn apply_picked(app: &mut TextureCraftApp, picked: Vec<(String, Vec<u8>, Pick)>)
                 app.toast(tr("No project is open"), true);
                 continue;
             }
+
             Pick::Environment(project_id) | Pick::HighPoly(project_id) | Pick::Cage(project_id) if project_id != app.session.project_id => {
                 app.toast(tr("The project changed while the dialog was open, so nothing was done"), true);
                 continue;
             }
+
             Pick::Environment(_) => app.session.import_resource_bytes(&name, bytes).map(|res| use_environment(app, &res)),
             Pick::HighPoly(_) => app.session.add_high_poly_bytes(&name, bytes).map(|n| app.toast(trf("High poly: {name}", &[("name", &n)]), false)),
             Pick::Cage(_) => app.session.set_cage_bytes(&name, bytes).map(|n| app.toast(trf("Cage: {name}", &[("name", &n)]), false)),
+            Pick::NewProjectMesh(request_id) => {
+                if app.ui.windows.new_project && app.ui.new_project.mesh_request_id == request_id {
+                    app.ui.new_project.file = Some(name);
+                    app.ui.new_project.file_bytes = Some(std::sync::Arc::new(bytes));
+                }
+                continue;
+            }
+
             Pick::ExportPreset => {
                 match texturecraft_engine::formats::preset_from_json(&String::from_utf8_lossy(&bytes)) {
                     Ok(p) => crate::export_templates::import(app, &p),
@@ -121,7 +133,7 @@ pub fn import_environment(app: &mut TextureCraftApp, _ctx: &egui::Context) {
 }
 
 /// Make image resource `name` the environment.
-fn use_environment(app: &mut TextureCraftApp, name: &str) {
+pub(crate) fn use_environment(app: &mut TextureCraftApp, name: &str) {
     let env = format!("{}{name}", texturecraft_engine::core::project::ENV_RESOURCE_PREFIX);
     if app.run("display.set", serde_json::json!({ "environment": env })).is_some() {
         app.toast(trf("Environment: {name}", &[("name", &name)]), false);
@@ -230,8 +242,8 @@ fn zip_files(files: &[ExportedFile]) -> Result<Vec<u8>, String> {
 
 #[cfg(target_arch = "wasm32")]
 pub use web::{
-    download, export_mesh, export_textures, import_bake_mesh, import_environment, import_images, import_material, import_preset, open, save_project,
-    sync_unsaved, unsaved,
+    download, export_mesh, export_textures, import_bake_mesh, import_environment, import_images, import_material, import_preset, open, pick_new_project_mesh,
+    save_project, sync_unsaved, unsaved,
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -282,6 +294,11 @@ mod web {
     /// Export dialog › Output templates › Import: pick a template; it is added on a later frame.
     pub fn import_preset(ctx: &egui::Context) {
         pick(ctx, tr("Export templates"), &["json"], false, Pick::ExportPreset);
+    }
+
+    /// New project › Select...: pick the mesh file; Create reads it once it has arrived.
+    pub fn pick_new_project_mesh(ctx: &egui::Context, request_id: u64) {
+        pick(ctx, tr("3D meshes"), &MESH_EXTENSIONS, false, Pick::NewProjectMesh(request_id));
     }
 
     fn pick(ctx: &egui::Context, filter: &'static str, exts: &'static [&'static str], multiple: bool, kind: Pick) {
@@ -385,6 +402,28 @@ mod tests {
     use super::*;
 
     use egui_kittest::Harness;
+
+    #[test]
+    fn mesh_picks_only_update_the_current_new_project_request() {
+        let session = Session::closed().unwrap();
+        let mut harness = Harness::builder().build_eframe(|context| TextureCraftApp::new(context, session));
+        let app = harness.state_mut();
+        crate::new_project_advanced::open(app);
+        app.ui.new_project.mesh_request_id = 2;
+
+        apply_picked(app, vec![("new.obj".into(), vec![2; 4096], Pick::NewProjectMesh(2)), ("stale.obj".into(), vec![1; 8192], Pick::NewProjectMesh(1))]);
+
+        assert_eq!(app.ui.new_project.file.as_deref(), Some("new.obj"));
+        assert_eq!(app.ui.new_project.file_bytes.as_deref().unwrap().as_slice(), &[2; 4096]);
+        let previous_buffer = std::sync::Arc::downgrade(app.ui.new_project.file_bytes.as_ref().unwrap());
+
+        crate::new_project_advanced::open(app);
+        apply_picked(app, vec![("previous.obj".into(), vec![3; 2048], Pick::NewProjectMesh(2))]);
+
+        assert!(app.ui.new_project.file.is_none());
+        assert!(app.ui.new_project.file_bytes.is_none());
+        assert!(previous_buffer.upgrade().is_none());
+    }
 
     #[test]
     fn environment_pick_after_close_does_not_edit_the_placeholder() {

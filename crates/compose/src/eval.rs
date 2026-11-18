@@ -21,7 +21,8 @@ use texturecraft_texel::{DilationMap, TILE, TILE_AREA, TileImage, from_u16, nois
 use crate::below::{Band, BelowCache, Level, StackKey};
 use crate::curvature_sizes::CurvatureSizes;
 use crate::held_fields::HeldFields;
-use crate::pattern::{Coords, decal_uv_symmetric, image_samples, procedural, world_noise};
+use crate::pattern::{Coords, decal_uv_symmetric, image_samples, pattern_pixels, procedural_in, world_noise};
+use crate::pattern_context::PatternContext;
 use crate::store::{BakedMaps, ImageStore, PixelStore, decode};
 
 const NCH: usize = Channel::ALL.len();
@@ -123,6 +124,11 @@ impl Inputs<'_> {
     /// with it, and with the tile's share of its block.
     fn tile_res(&self) -> u32 {
         self.gbuf.width / self.tile_grid().map_or(1, |g| g.cols.max(1))
+    }
+
+    /// The current UV tile can occupy only part of its atlas block
+    fn tile_res_at(&self, x: u32, y: u32) -> u32 {
+        ((self.tile_res() as f32 * self.block_scales.at(x, y)).round() as u32).max(1)
     }
 }
 
@@ -1442,11 +1448,6 @@ impl<'a, 'b> Texel<'a, 'b> {
         match source {
             Source::Uniform(value) => *value,
 
-            // A gradient map: on color channels the value picks a color along the stops
-            Source::Procedural { pattern, ramp, .. } if kind == ChannelKind::Color && !ramp.is_empty() => {
-                let (coords, projection, _) = self.projected(projection);
-                texturecraft_core::gradient(ramp, procedural(pattern, projection, &coords)).unwrap_or_default()
-            }
             Source::Anchor { anchor, channel, ramp } if kind == ChannelKind::Color && !ramp.is_empty() => {
                 let value = self.anchored(*anchor, *channel);
 
@@ -1455,10 +1456,22 @@ impl<'a, 'b> Texel<'a, 'b> {
                 let lightness = if signed { lum(value) * 0.5 + 0.5 } else { lum(value) };
                 texturecraft_core::gradient(ramp, lightness).unwrap_or_default()
             }
-            Source::Procedural { pattern, low, high, .. } => {
+            Source::Procedural { pattern, low, high, ramp } => {
                 let (coords, projection, _) = self.projected(projection);
-                let amount = procedural(pattern, projection, &coords);
-                mix3(*low, *high, amount)
+                let pixels = if pattern.resolution.can_reduce() {
+                    let uv_tile = self.inp.tile_res_at(self.x, self.y);
+                    let texture_set = self.inp.project.texture_set(self.inp.ts).map_or(uv_tile, |set| set.resolution);
+                    pattern_pixels(pattern, uv_tile, texture_set)
+                } else {
+                    None
+                };
+                let amount = procedural_in(pattern, projection, &coords, &PatternContext { pixels, images: Some(self.inp.images) });
+
+                if kind == ChannelKind::Color && !ramp.is_empty() {
+                    texturecraft_core::gradient(ramp, amount).unwrap_or_default()
+                } else {
+                    mix3(*low, *high, amount)
+                }
             }
             Source::Image { name, normal_format } => {
                 let Some(image) = self.inp.images.get(name) else { return [0.5; 3] };
@@ -2816,6 +2829,39 @@ mod tests {
         let mut out = Composite::new(&f.project.texture_sets[0].channel_list(), 64);
         composite_tiles(&inp, &mut out, &all_tiles(64, 64));
         out
+    }
+
+    #[test]
+    fn procedural_resolution_uses_each_uv_tiles_scale() {
+        let mut fixture = fixture();
+        let set = &mut fixture.project.texture_sets[0];
+        set.uv_tiles = vec![1001, 1002];
+        set.resolution = 64;
+        set.tile_resolutions.insert(1002, 32);
+        fixture.gbuf = UvGBuffer::new(&fixture.mesh, 0, 128, 64);
+        let block_scales = set.block_scales();
+        let images = ImageStore::default();
+        let inputs = Inputs {
+            project: &fixture.project,
+            ts: 0,
+            mesh: &fixture.mesh,
+            gbuf: &fixture.gbuf,
+            pixels: &fixture.pixels,
+            baked: &fixture.baked,
+            block_scales,
+            preview: None,
+            images: &images,
+            bounds: fixture.mesh.bounds(),
+        };
+
+        assert_eq!(inputs.tile_res_at(0, 0), 64);
+        assert_eq!(inputs.tile_res_at(64, 0), 32);
+
+        let mut pattern = Procedural::new(ProceduralKind::Checker);
+        pattern.resolution.factor = -1;
+
+        assert_eq!(pattern_pixels(&pattern, inputs.tile_res_at(0, 0), 64), Some(32));
+        assert_eq!(pattern_pixels(&pattern, inputs.tile_res_at(64, 0), 64), Some(16));
     }
 
     fn fill_layer(p: &mut Project, color: [f32; 3], rough: f32) -> LayerId {

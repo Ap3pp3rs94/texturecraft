@@ -9,8 +9,14 @@ use crate::saved_search::SavedSearch;
 use crate::shelf_panes::ShelfPanes;
 use crate::shelf_view::ShelfView;
 
+mod import_resources;
+mod import_row;
 mod project_config;
+mod resource_usage;
+pub use import_resources::ImportResources;
+pub use import_row::ImportRow;
 pub use project_config::ProjectConfig;
+pub use resource_usage::ResourceUsage;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum Mode {
@@ -82,6 +88,9 @@ pub struct Windows {
     /// Edit > Project Configuration: what is chosen so far, applied by OK.
     #[serde(skip)]
     pub project_config: Option<ProjectConfig>,
+    /// File > Import resources: the files added so far, imported by Import.
+    #[serde(skip)]
+    pub import_resources: Option<ImportResources>,
     /// What waits on the unsaved-changes dialog: save, don't save or cancel.
     #[serde(skip)]
     pub unsaved: Option<Unsaved>,
@@ -94,8 +103,10 @@ pub struct Windows {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Unsaved {
     Quit,
-    /// A menu command (New project, Open, Close, Open sample project).
+    /// A menu command (Open, Close, Open sample project).
     Command(String),
+    /// Create from the New project form that requested confirmation.
+    CreateProject(u64),
     /// Open this project or mesh file.
     #[cfg(not(target_arch = "wasm32"))]
     Open(String),
@@ -163,22 +174,32 @@ impl Prefs {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct NewProject {
-    pub mesh: String,
     pub resolution: u32,
-    pub name: String,
-    /// A mesh file chosen from disk (desktop only).
+    /// The mesh file chosen with Select... (its path on the desktop, its name in the browser).
     pub file: Option<String>,
-    /// UV tile (UDIM) workflow: on, off, or None for when the mesh's UVs leave tile 1001.
+    /// The browser's copy of the chosen mesh file, read when Create is pressed.
+    #[serde(skip)]
+    pub file_bytes: Option<std::sync::Arc<Vec<u8>>>,
+    /// The active form opening, used to reject late file picker answers.
+    #[serde(skip)]
+    pub opening_id: u64,
+    /// The latest mesh pick requested by this form.
+    #[serde(skip)]
+    pub mesh_request_id: u64,
+    /// Use UV Tile workflow: Some(true) makes UV tile (UDIM) texture sets; otherwise each set paints tile 1001.
     pub uv_tiles: Option<bool>,
     /// Project template name (built-in or the user's).
     #[serde(default = "default_template")]
     pub template: String,
-    /// Name typed to save the current project's settings as a template.
-    #[serde(skip)]
-    pub template_name: String,
     /// Normal map format of the project and its imported normal maps; None keeps the template's
     #[serde(default)]
     pub normal_format: Option<NormalFormat>,
+    /// Import settings > Import cameras: keep the cameras stored in the mesh file
+    #[serde(default = "import_cameras_default")]
+    pub import_cameras: bool,
+    /// Color management as chosen in the window (the project is always created as Legacy)
+    #[serde(skip)]
+    pub color_management: crate::project_form::ColorManagement,
     /// Baked map files to import at creation, matched to sets and mesh maps by name (desktop only)
     #[serde(skip)]
     pub baked_maps: Vec<String>,
@@ -188,17 +209,32 @@ fn default_template() -> String {
     texturecraft_engine::template_cmds::DEFAULT_TEMPLATE.into()
 }
 
+fn import_cameras_default() -> bool {
+    true
+}
+
+impl NewProject {
+    pub(crate) fn clear_mesh(&mut self) {
+        self.file = None;
+        self.file_bytes = None;
+        self.opening_id = 0;
+        self.mesh_request_id = 0;
+    }
+}
+
 impl Default for NewProject {
     fn default() -> Self {
         NewProject {
-            mesh: "material_ball".into(),
-            resolution: 2048,
-            name: "Untitled".into(),
+            resolution: 1024,
             file: None,
+            file_bytes: None,
+            opening_id: 0,
+            mesh_request_id: 0,
             uv_tiles: None,
             template: default_template(),
-            template_name: String::new(),
             normal_format: None,
+            import_cameras: true,
+            color_management: crate::project_form::ColorManagement::Legacy,
             baked_maps: Vec::new(),
         }
     }
@@ -274,10 +310,23 @@ fn default_split_ratio() -> f32 {
     0.5
 }
 
+/// Saved searches start with this share of the Assets panel's pane column while Filter by path is open too
+pub(crate) fn default_shelf_panes_split() -> f32 {
+    0.45
+}
+
+fn deserialize_shelf_panes_split<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<f32, D::Error> {
+    let share = f32::deserialize(deserializer)?;
+
+    // A finite JSON number can overflow f32 and prevent the next settings save
+    Ok(if share.is_finite() { share } else { default_shelf_panes_split() })
+}
+
 /// Settings that start on, for saved states that predate them
 fn default_true() -> bool {
     true
 }
+
 /// The bake layout's version: saved bake docks from an older one load as `Dock::for_baking`
 const BAKE_LAYOUT_VERSION: u32 = 2;
 
@@ -330,6 +379,9 @@ pub struct UiState {
     /// The asset shelf's saved queries, in the order they were saved
     #[serde(default)]
     pub shelf_saved_searches: Vec<SavedSearch>,
+    /// Saved searches' share of the pane column above Filter by path, set by the splitter between them
+    #[serde(default = "default_shelf_panes_split", deserialize_with = "deserialize_shelf_panes_split")]
+    pub shelf_panes_split: f32,
     pub props_tab: PropsTab,
     #[serde(default)]
     pub text: TextUi,
@@ -412,6 +464,15 @@ impl UiState {
     pub fn adopt_layout(&mut self, layout: UiState) {
         let keep = std::mem::replace(self, layout);
         self.new_project = keep.new_project;
+        if !self.windows.new_project {
+            self.new_project.clear_mesh();
+
+            // Keep a failed import queued when the form was already closed
+            if keep.windows.new_project {
+                self.new_project.baked_maps = Vec::new();
+            }
+        }
+
         self.export = keep.export;
         self.recent = keep.recent;
         self.prefs = keep.prefs;
@@ -454,6 +515,7 @@ impl Default for UiState {
             shelf_view: ShelfView::default(),
             shelf_panes: ShelfPanes::default(),
             shelf_saved_searches: Vec::new(),
+            shelf_panes_split: default_shelf_panes_split(),
             props_tab: PropsTab::Brush,
             text: TextUi::default(),
             rename: None,

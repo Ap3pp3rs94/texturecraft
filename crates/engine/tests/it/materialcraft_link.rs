@@ -10,7 +10,7 @@ use texturecraft_engine::compose::BakedMaps;
 use texturecraft_engine::core::{BakedMap, Channel, LayerId, LayerKind, NormalFormat, Source};
 use texturecraft_engine::formats::mcmat::mesh_map_png;
 use texturecraft_engine::geom::primitives;
-use texturecraft_engine::link_cmds::{CookedMap, CookedMaterial};
+use texturecraft_engine::link_cmds::{CookedMap, CookedMaterial, LinkMemoryBudget};
 use texturecraft_engine::materials::Place;
 use texturecraft_engine::{Session, execute};
 
@@ -39,15 +39,12 @@ fn cooked(roughness: f32, wear: f32) -> CookedMaterial {
         ],
         "presets": [{"name": "Worn", "values": {"wear": {"t": "float", "v": 1.0}, "note": {"t": "text", "v": "x"}}}],
     });
-    let mut remaining = CookedMap::MAX_TOTAL_TEXELS;
-    CookedMaterial {
-        interface: serde_json::from_value(interface).unwrap(),
-        size: 4,
-        maps: [(Channel::BaseColor, mesh_map_png(4, 3, &[0.5; 48]).unwrap()), (Channel::Roughness, gray(roughness)), (Channel::AmbientOcclusion, gray(1.0))]
-            .into_iter()
-            .map(|(channel, bytes)| CookedMap::decode(channel, bytes, &mut remaining).unwrap())
-            .collect(),
-    }
+    let mut budget = LinkMemoryBudget::new(1 << 20);
+    let maps = [(Channel::BaseColor, mesh_map_png(4, 3, &[0.5; 48]).unwrap()), (Channel::Roughness, gray(roughness)), (Channel::AmbientOcclusion, gray(1.0))]
+        .into_iter()
+        .map(|(channel, bytes)| CookedMap::decode(channel, bytes, [4, 4], &mut budget).unwrap())
+        .collect();
+    CookedMaterial::new(serde_json::from_value(interface).unwrap(), maps, 4)
 }
 
 fn install(session: &mut Session) -> LayerId {
@@ -76,8 +73,31 @@ fn map_name(s: &Session, id: LayerId, c: Channel) -> String {
     }
 }
 
+// Real cook reservations must be independent of saves in other parallel integration tests
+fn run_in_private_process() -> bool {
+    const CHILD_TEST: &str = "TC_MATERIALCRAFT_CHILD_TEST";
+
+    let thread = std::thread::current();
+    let name = thread.name().unwrap();
+    if std::env::var(CHILD_TEST).as_deref() == Ok(name) {
+        return false;
+    }
+
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", name, "--include-ignored", "--nocapture"])
+        .env(CHILD_TEST, name)
+        .status()
+        .unwrap();
+    assert!(status.success(), "{name} returned {status}");
+    true
+}
+
 #[test]
 fn version_two_requires_republishing_before_install() {
+    if run_in_private_process() {
+        return;
+    }
+
     let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     zip.start_file("material.json", zip::write::SimpleFileOptions::default()).unwrap();
     zip.write_all(br#"{"version":2,"format":"craft-material"}"#).unwrap();
@@ -92,7 +112,8 @@ fn imports_as_a_linked_fill_with_its_maps() {
     let id = install(&mut s);
     assert_eq!(s.selected_layer(), Some(id));
     assert!((roughness(&mut s) - 0.25).abs() < 2e-3);
-    // The material's channels join the texture set; text inputs are not editable here.
+
+    // The fill adds its mapped channels and omits text parameters
     assert!(s.doc.project.texture_sets[0].has_channel(Channel::AmbientOcclusion));
     let l = link(&s, id);
     assert_eq!(l.graph, "Brick_wall");
@@ -100,13 +121,15 @@ fn imports_as_a_linked_fill_with_its_maps() {
     assert_eq!(l.inputs, ["curvature", "normal", "worldNormal", "ambientOcclusion", "bentNormal"]);
     assert_eq!(s.doc.resources.get(&l.package).map(|b| b.as_slice()), Some(&b"package bytes"[..]));
     assert!(!s.images.contains_key(&l.package), "the package is not decoded as an image");
-    // Inspect shows the link; one undo removes everything.
+
+    // One undo removes the link exposed through inspect
     let inspect = execute(&mut s, "project.inspect", &Value::Null).unwrap().to_string();
     assert!(inspect.contains("Brick_wall"), "{inspect}");
     let n = s.doc.resources.len();
     execute(&mut s, "edit.undo", &Value::Null).unwrap();
     assert!(s.doc.project.layer(id).is_err() && s.doc.resources.len() < n);
-    // Garbage is an error, not a layer.
+
+    // Invalid archives leave the stack untouched
     assert!(s.add_linked_material_bytes_at(b"PK not really", Place::Selection).is_err());
 }
 
@@ -176,7 +199,7 @@ fn duplicates_keep_their_maps_and_mesh_maps_feed_inputs() {
     let maps = [BakedMap::Curvature, BakedMap::Normal, BakedMap::WorldNormal, BakedMap::AmbientOcclusion, BakedMap::BentNormal];
     session.doc.baked.insert(0, BakedMaps { resolution: 4, maps: maps.into_iter().map(|map| (map, Arc::new(vec![0.5f32; 16 * map.components()]))).collect() });
     let job = session.link_job(id, &serde_json::Map::new()).unwrap();
-    assert_eq!(job.inputs.iter().map(|(identifier, _)| identifier.as_str()).collect::<Vec<_>>(), maps.map(BakedMap::id));
+    assert_eq!(job.input_identifiers.iter().map(String::as_str).collect::<Vec<_>>(), maps.map(BakedMap::id));
     assert_eq!(maps.map(BakedMap::id), ["curvature", "normal", "worldNormal", "ambientOcclusion", "bentNormal"]);
 }
 
@@ -184,10 +207,17 @@ fn duplicates_keep_their_maps_and_mesh_maps_feed_inputs() {
 fn projects_save_the_link_and_its_package() {
     let mut s = session();
     let id = install(&mut s);
-    let back = Session::from_project_bytes(&s.to_project_bytes().unwrap()).unwrap();
+    let snapshot = s.project_snapshot();
+    assert!(snapshot.resources.iter().all(|(name, bytes)| Arc::ptr_eq(bytes, &s.doc.resources[name])));
+    let owned = s.project_file();
+    let saved = s.to_project_bytes().unwrap();
+
+    assert_eq!(saved, texturecraft_engine::formats::save_project_bytes(&owned).unwrap());
+    let back = Session::from_project_bytes(&saved).unwrap();
     assert_eq!(link(&back, id), link(&s, id));
     assert!(back.doc.resources.contains_key(&link(&s, id).package));
-    // Smart materials made from the layer carry the package too.
+
+    // Layer exports also carry the source package
     let tcmat = s.smart_material_bytes(id, "Bricks").unwrap();
     let mut other = session();
     let copy = other.add_smart_material_bytes(&tcmat).unwrap();
@@ -201,6 +231,11 @@ fn cooks_through_materialcraft_cli_when_available() {
         eprintln!("MATERIALCRAFT_CLI is not set: skipping the materialcraft-cli round trip");
         return;
     };
+
+    if run_in_private_process() {
+        return;
+    }
+
     let temp = tempfile::tempdir().unwrap();
     let dir = temp.path();
     let pkg = dir.join("bricks.mcraft");
@@ -221,7 +256,8 @@ fn cooks_through_materialcraft_cli_when_available() {
         .status()
         .unwrap();
     assert!(ok.success());
-    // This input feeds the metallic output from the texture set's baked curvature.
+
+    // Feed metallic from the texture set's baked curvature
     let with_input = dir.join("with_input.mcraft");
     let add = std::process::Command::new(&cli)
         .arg("run")
@@ -255,20 +291,46 @@ fn cooks_through_materialcraft_cli_when_available() {
     execute(&mut s, "material.link.saveSource", &json!({"layer": id.0, "path": out.to_str().unwrap()})).unwrap();
     assert_eq!(std::fs::read(&out).unwrap(), std::fs::read(&exposed).unwrap());
 
-    // The portable material can name a graph other than the first in the embedded source.
+    // Publish a graph with distinct pixels to verify graph selection
     let multi = dir.join("multi.mcraft");
     let ok = std::process::Command::new(&cli).arg("run").arg(&exposed).arg("graph.duplicate").arg("{}").arg("-o").arg(&multi).status().unwrap();
     assert!(ok.success());
+    let edited = dir.join("edited.mcraft");
+    let script = dir.join("edit-graph.json");
+    std::fs::write(
+        &script,
+        json!({
+            "open": multi,
+            "steps": [
+                {"id":"graph.open","params":{"graph":1}},
+                {"id":"graph.exposed.set","params":{"id":"wear","value":[0.2,0.2,0.2,1.0]}}
+            ],
+            "save": edited
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let changed = std::process::Command::new(&cli).arg("batch").arg(&script).output().unwrap();
+    assert!(changed.status.success(), "{}", String::from_utf8_lossy(&changed.stderr));
+    let info = std::process::Command::new(&cli).arg("run").arg(&edited).args(["material.info", r#"{"graph":1}"#]).output().unwrap();
+    assert!(info.status.success(), "{}", String::from_utf8_lossy(&info.stderr));
+    let interface: Value = serde_json::from_slice(&info.stdout).unwrap();
+    let expected_graph = interface["graph"].as_str().unwrap();
     let portable = dir.join("second.mcmat");
-    let ok = std::process::Command::new(&cli).arg("publish").arg(&multi).arg(&portable).args(["--graph", "1"]).status().unwrap();
+    let ok = std::process::Command::new(&cli).arg("publish").arg(&edited).arg(&portable).args(["--graph", "1"]).status().unwrap();
     assert!(ok.success());
-    let second = s.add_linked_material_bytes_at(&std::fs::read(&portable).unwrap(), Place::Selection).unwrap();
-    let expected_graph = link(&s, second).graph;
+    let renamed = dir.join("second.asset");
+    std::fs::rename(portable, &renamed).unwrap();
+    let loaded = execute(&mut s, "material.load", &json!({"path":renamed})).unwrap();
+    let second = LayerId(loaded["layer"].as_u64().unwrap());
+    assert_eq!(link(&s, second).graph, expected_graph);
+    let second_map = map_name(&s, second, Channel::Roughness);
+    assert!((s.images[&second_map].rgba[0][0] - 0.2).abs() < 0.01);
     s.update();
     assert!((s.caches[0].composite.value(Channel::Metallic, 64, 64)[0] - 0.35).abs() < 0.01);
     let job = s.link_job(second, &serde_json::Map::new()).unwrap();
     assert_eq!(job.source_ext, "mcmat");
-    assert_eq!(job.package.as_slice(), std::fs::read(&portable).unwrap());
+    assert_eq!(job.package.as_slice(), std::fs::read(&renamed).unwrap());
     let result = job.run().unwrap();
     assert_eq!(result.interface.graph, expected_graph);
     assert_eq!(result.size, 128);
@@ -285,4 +347,94 @@ fn installing_a_bake_reuses_its_encoded_map_buffers() {
 
     assert!(Arc::ptr_eq(&session.doc.resources[&name], &prepared.bytes));
     assert!(Arc::ptr_eq(&session.images[&name], &prepared.image));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "requires MaterialCraft CLI and at least 8 GiB of available memory"]
+fn three_8k_maps_respect_budget_and_survive_reopen() {
+    use texturecraft_engine::formats::save_ram_budget;
+    use texturecraft_engine::link_cmds::cook_link_file;
+
+    const RESOLUTION: u32 = 8192;
+    const FIXTURE_AVAILABLE_BYTES: u64 = 16 << 30;
+    if run_in_private_process() {
+        return;
+    }
+
+    let cli = std::env::var_os("MATERIALCRAFT_CLI").expect("set MATERIALCRAFT_CLI to the compatible CLI");
+    let temp = tempfile::tempdir().unwrap();
+    let mut authoring = temp.path().join("pbr.mcraft");
+    assert!(std::process::Command::new(&cli).args(["new", "pbr"]).arg(&authoring).args(["--size", "32"]).status().unwrap().success());
+
+    // Keep base color, roughness and metallic from the PBR fixture
+    for node in [4, 10, 12] {
+        let next = temp.path().join(format!("after-{node}.mcraft"));
+        let args = json!({"to":node,"toPort":"input"}).to_string();
+        let output = std::process::Command::new(&cli).arg("run").arg(&authoring).args(["graph.disconnect", &args, "-o"]).arg(&next).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        authoring = next;
+    }
+
+    let path = temp.path().join("three.mcmat");
+    assert!(std::process::Command::new(&cli).arg("publish").arg(&authoring).arg(&path).args(["--graph", "0"]).status().unwrap().success());
+    let mut session = Session::new_project("Budget", primitives::cube(1.0), "builtin:cube", None, RESOLUTION).unwrap();
+    let original = session.to_project_bytes().unwrap();
+
+    let save = texturecraft_engine::formats::RamReservation::for_save().unwrap();
+    let blocked = cook_link_file(&path, RESOLUTION, None, LinkMemoryBudget::new(FIXTURE_AVAILABLE_BYTES), Arc::default()).unwrap_err();
+    assert!(blocked.to_string().contains("a project save is using the RAM allowance"));
+    drop(save);
+
+    let low = LinkMemoryBudget::new(save_ram_budget(FIXTURE_AVAILABLE_BYTES, 1));
+    let companion_limited = LinkMemoryBudget::new(save_ram_budget(FIXTURE_AVAILABLE_BYTES, 10));
+
+    let error = cook_link_file(&path, RESOLUTION, None, low, Arc::default()).unwrap_err();
+
+    assert!(error.to_string().contains("configured cap"), "{error}");
+    assert_eq!(session.to_project_bytes().unwrap(), original);
+
+    let error = cook_link_file(&path, RESOLUTION, None, companion_limited, Arc::default()).unwrap_err();
+
+    assert!(error.to_string().contains("MaterialCraft cook failed"), "{error}");
+    assert!(error.to_string().contains("configured cap"), "{error}");
+    assert_eq!(session.to_project_bytes().unwrap(), original);
+
+    let high = LinkMemoryBudget::new(save_ram_budget(FIXTURE_AVAILABLE_BYTES, 50));
+    let (source, cook) = cook_link_file(&path, RESOLUTION, None, high, Arc::default()).unwrap();
+    let probes: Vec<_> = cook.maps.iter().map(|map| Arc::downgrade(&map.image)).collect();
+
+    assert_eq!(cook.maps.len(), 3);
+    assert!(cook.maps.iter().all(|map| [map.image.width, map.image.height] == [RESOLUTION; 2]));
+
+    let layer = session.add_cooked_material(&cook, source.package, source.source_ext, Place::Selection).unwrap();
+    let save_blocked = session.to_project_bytes().unwrap_err();
+    assert!(save_blocked.to_string().contains("a MaterialCraft cook is using the RAM allowance"));
+    drop(cook);
+    let encoded = session.to_project_bytes().unwrap();
+
+    assert!(probes.iter().all(|probe| probe.upgrade().is_some()));
+    execute(&mut session, "edit.undo", &Value::Null).unwrap();
+    assert!(probes.iter().all(|probe| probe.upgrade().is_none()));
+    drop(session);
+
+    let reopened = Session::from_project_bytes(&encoded).unwrap();
+
+    assert!(reopened.doc.project.layer(layer).is_ok());
+    for channel in [Channel::BaseColor, Channel::Roughness, Channel::Metallic] {
+        let name = map_name(&reopened, layer, channel);
+        let image = &reopened.images[&name];
+        assert_eq!([image.width, image.height], [RESOLUTION; 2]);
+    }
+}
+
+#[test]
+fn image_with_material_extension_reopens_as_an_image() {
+    let mut session = session();
+    let bytes = mesh_map_png(2, 1, &[0.5; 4]).unwrap();
+    let name = session.import_resource_bytes("swatch.sbs", bytes).unwrap();
+
+    let reopened = Session::from_project_bytes(&session.to_project_bytes().unwrap()).unwrap();
+
+    assert_eq!(reopened.images[&name].rgba.len(), 4);
 }
