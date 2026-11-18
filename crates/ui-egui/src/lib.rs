@@ -147,7 +147,7 @@ pub struct TextureCraftApp {
     pub resize: Option<ResizeJob>,
     pub link_cooks: Vec<LinkCook>,
     #[cfg(not(target_arch = "wasm32"))]
-    link_imports: Vec<link_import::Import>,
+    link_imports: Vec<link_import::LinkImport>,
     pub thumbs: thumbs::Thumbs,
     /// The Layers panel's thumbnails and folded groups.
     pub layer_panel: layer_panel::LayerPanel,

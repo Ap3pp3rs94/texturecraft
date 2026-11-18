@@ -10,7 +10,7 @@ use texturecraft_engine::compose::BakedMaps;
 use texturecraft_engine::core::{BakedMap, Channel, LayerId, LayerKind, NormalFormat, Source};
 use texturecraft_engine::formats::mcmat::mesh_map_png;
 use texturecraft_engine::geom::primitives;
-use texturecraft_engine::link_cmds::CookedMaterial;
+use texturecraft_engine::link_cmds::{CookedMap, CookedMaterial};
 use texturecraft_engine::materials::Place;
 use texturecraft_engine::{Session, execute};
 
@@ -39,14 +39,14 @@ fn cooked(roughness: f32, wear: f32) -> CookedMaterial {
         ],
         "presets": [{"name": "Worn", "values": {"wear": {"t": "float", "v": 1.0}, "note": {"t": "text", "v": "x"}}}],
     });
+    let mut remaining = CookedMap::MAX_TOTAL_TEXELS;
     CookedMaterial {
         interface: serde_json::from_value(interface).unwrap(),
         size: 4,
-        maps: vec![
-            ("baseColor".into(), mesh_map_png(4, 3, &[0.5; 48]).unwrap()),
-            ("roughness".into(), gray(roughness)),
-            ("ambientOcclusion".into(), gray(1.0)),
-        ],
+        maps: [(Channel::BaseColor, mesh_map_png(4, 3, &[0.5; 48]).unwrap()), (Channel::Roughness, gray(roughness)), (Channel::AmbientOcclusion, gray(1.0))]
+            .into_iter()
+            .map(|(channel, bytes)| CookedMap::decode(channel, bytes, &mut remaining).unwrap())
+            .collect(),
     }
 }
 
@@ -207,9 +207,13 @@ fn cooks_through_materialcraft_cli_when_available() {
     let ok = std::process::Command::new(&cli).args(["new", "pbr"]).arg(&pkg).args(["--size", "64"]).status().unwrap();
     assert!(ok.success());
     let exposed = dir.join("exposed.mcraft");
+    let rectangular = dir.join("rectangular.mcraft");
+    let resize =
+        std::process::Command::new(&cli).arg("run").arg(&pkg).args(["graph.size", r#"{"width":64,"height":32}"#, "-o"]).arg(&rectangular).status().unwrap();
+    assert!(resize.success());
     let ok = std::process::Command::new(&cli)
         .arg("run")
-        .arg(&pkg)
+        .arg(&rectangular)
         .arg("graph.exposed.add")
         .arg(r#"{"id":"wear","bind":{"node":5,"param":"color"}}"#)
         .arg("-o")
@@ -238,6 +242,8 @@ fn cooks_through_materialcraft_cli_when_available() {
     s.doc.baked.insert(0, BakedMaps { resolution: 16, maps: [(BakedMap::Curvature, Arc::new(vec![0.35; 256]))].into() });
     let id = s.add_linked_material_bytes_at(&std::fs::read(&exposed).unwrap(), Place::Selection).unwrap();
     assert_eq!(link(&s, id).size, 128, "cooked at the texture set's resolution");
+    let image = &s.images[&map_name(&s, id, Channel::Roughness)];
+    assert_eq!([image.width, image.height], [128, 128]);
     assert!(link(&s, id).params.iter().any(|p| p.id == "wear"));
     assert!((roughness(&mut s) - 0.5).abs() < 0.01);
     assert!((s.caches[0].composite.value(Channel::Metallic, 64, 64)[0] - 0.35).abs() < 0.01);
@@ -266,4 +272,17 @@ fn cooks_through_materialcraft_cli_when_available() {
     let result = job.run().unwrap();
     assert_eq!(result.interface.graph, expected_graph);
     assert_eq!(result.size, 128);
+}
+
+#[test]
+fn installing_a_bake_reuses_its_encoded_map_buffers() {
+    let material = cooked(0.25, 0.5);
+    let prepared = &material.maps[1];
+    let mut session = session();
+
+    let id = session.add_cooked_material(&material, Arc::new(Vec::new()), "mcmat", Place::Selection).unwrap();
+    let name = map_name(&session, id, Channel::Roughness);
+
+    assert!(Arc::ptr_eq(&session.doc.resources[&name], &prepared.bytes));
+    assert!(Arc::ptr_eq(&session.images[&name], &prepared.image));
 }

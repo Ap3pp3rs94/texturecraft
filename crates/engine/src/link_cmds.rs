@@ -8,11 +8,27 @@ use std::sync::Arc;
 
 use serde_json::{Map, Value, json};
 use texturecraft_core::{BakedMap, Channel, Fill, Layer, LayerId, LayerKind, LinkParam, MaterialLink, Source};
-use texturecraft_formats::mcmat::{MCRAFT_EXT, is_mcraft, validate_mcmat};
+use texturecraft_formats::mcmat::{MCRAFT_EXT, is_mcmat, is_mcraft, validate_mcmat};
 
 use crate::commands::{CommandSpec, bad, boolp, has_layer, layer_param, strp};
 use crate::materials::Place;
 use crate::{EngineError, Result, Session, cmd};
+
+#[cfg(not(target_arch = "wasm32"))]
+mod cook_report;
+mod cooked_map;
+mod cooked_material;
+mod image_input;
+mod link_job;
+#[cfg(not(target_arch = "wasm32"))]
+mod map_file;
+mod material_interface;
+
+pub use cooked_map::CookedMap;
+pub use cooked_material::CookedMaterial;
+pub use image_input::ImageInput;
+pub use link_job::LinkJob;
+pub use material_interface::MaterialInterface;
 
 /// The undo label of parameter edits and re-cooks (a re-cook merges into the edit before it).
 const EDIT: &str = "Edit MaterialCraft material";
@@ -192,24 +208,6 @@ fn save_source(_: &mut Session, _: &Value) -> Result<Value> {
     Err(EngineError::Other("file paths are not available in the browser".into()))
 }
 
-/// A re-cook of a linked layer, to run anywhere (a worker thread) and hand back to
-/// [`Session::apply_link_cook`].
-#[derive(Clone, Debug)]
-pub struct LinkJob {
-    pub layer: LayerId,
-    pub package: Arc<Vec<u8>>,
-    /// The source package extension (`mcmat`, `mcraft` or `sbs`).
-    pub source_ext: &'static str,
-    /// The named graph in a linked material; direct package imports use its default.
-    pub graph: Option<String>,
-    /// Pixels across (the texture set's resolution).
-    pub size: u32,
-    /// Every parameter's value, by id, in MaterialCraft's typed form.
-    pub values: Map<String, Value>,
-    /// Graph inputs fed from baked mesh maps: identifier → 16-bit PNG.
-    pub inputs: Vec<(String, Vec<u8>)>,
-}
-
 /// A MaterialCraft executable: `$<env>`, else next to this program, else `name` on `PATH`.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn materialcraft_tool(name: &str, env: &str) -> std::path::PathBuf {
@@ -251,69 +249,33 @@ pub fn source_extension(name: &str) -> &'static str {
     }
 }
 
-#[derive(Clone, Debug, serde::Deserialize)]
-pub struct MaterialInterface {
-    pub name: String,
-    pub graph: String,
-    pub parameters: Vec<LinkParam>,
-    pub inputs: Vec<ImageInput>,
-    pub presets: Vec<texturecraft_core::LinkPreset>,
-}
-
-#[derive(Clone, Debug, serde::Deserialize)]
-pub struct ImageInput {
-    pub identifier: String,
-}
-
-#[derive(Clone, Debug)]
-pub struct CookedMaterial {
-    pub interface: MaterialInterface,
-    pub maps: Vec<(String, Vec<u8>)>,
-    pub size: u32,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-#[path = "link_cook.rs"]
-mod link_cook;
-
-#[cfg(target_arch = "wasm32")]
-impl LinkJob {
-    pub fn run_for_import(&self, _: Option<&texturecraft_compose::BakedMaps>) -> Result<CookedMaterial> {
-        self.run()
-    }
-    pub fn run(&self) -> Result<CookedMaterial> {
-        Err(EngineError::Other("cooking a procedural material requires materialcraft-cli on a desktop".into()))
-    }
-}
-
 /// Prepare the first bake without borrowing the paint document. Its original archive is kept for future cooks.
 fn cook_source(bytes: Vec<u8>, size: u32, baked: Option<&texturecraft_compose::BakedMaps>) -> Result<(LinkJob, CookedMaterial)> {
-    let source_ext = if is_mcraft(&bytes) {
+    let source_ext = if is_mcmat(&bytes) {
+        "mcmat"
+    } else if is_mcraft(&bytes) {
         MCRAFT_EXT
     } else {
-        validate_mcmat(&bytes).map_err(|e| EngineError::Other(e.to_string()))?;
-        "mcmat"
+        return Err(EngineError::Other("expected a MaterialCraft material or project archive".into()));
     };
+
     let job = LinkJob { layer: LayerId(0), package: Arc::new(bytes), source_ext, graph: None, size, values: Map::new(), inputs: Vec::new() };
-    let material = job.run_for_import(baked)?;
+    let material = job.run_for_import(baked).map_err(|error| {
+        // Older archives still need a republishing diagnostic when the desktop CLI is unavailable
+        if source_ext == "mcmat"
+            && let Err(format) = validate_mcmat(&job.package)
+        {
+            return EngineError::Other(format.to_string());
+        }
+
+        error
+    })?;
     Ok((job, material))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn cook_link_file(path: &std::path::Path, size: u32, baked: Option<&texturecraft_compose::BakedMaps>) -> Result<(LinkJob, CookedMaterial)> {
-    cook_source(link_cook::read_bounded(path, 1 << 30)?, size, baked)
-}
-
-/// Decode every map of `m` (validating them) with the channel it feeds.
-fn decoded_maps(m: &CookedMaterial) -> Result<Vec<(Channel, Vec<u8>, texturecraft_formats::DecodedImage)>> {
-    m.maps
-        .iter()
-        .filter_map(|(usage, bytes)| Some((Channel::ALL.into_iter().find(|c| c.id() == usage)?, bytes)))
-        .map(|(c, bytes)| {
-            let img = texturecraft_formats::decode_image(bytes).map_err(|e| EngineError::Other(format!("{} map: {e}", c.id())))?;
-            Ok((c, bytes.clone(), img))
-        })
-        .collect()
+    cook_source(link_job::read_bounded(path, link_job::MAX_COOK_BYTES)?, size, baked)
 }
 
 impl Session {
@@ -328,10 +290,10 @@ impl Session {
 
     /// Install validated CLI output in one undo step. Keep the original source for future variations.
     pub fn add_cooked_material(&mut self, m: &CookedMaterial, source: Arc<Vec<u8>>, source_ext: &str, place: Place) -> Result<LayerId> {
-        let maps = decoded_maps(m)?;
-        if maps.is_empty() {
+        if m.maps.is_empty() {
             return Err(EngineError::Other(format!("{} has no maps TextureCraft can paint with", m.interface.name)));
         }
+
         let label = format!("Add {}", m.interface.name);
         let (id, names) = self.edit(&label, |s| {
             let ts = s.ts();
@@ -352,7 +314,7 @@ impl Session {
                 size: m.size,
             };
             let mut fill = Fill { link: Some(Box::new(link)), ..Fill::default() };
-            let names = put_maps(s, &stem, &maps, &mut fill);
+            let names = put_maps(s, &stem, &m.maps, &mut fill);
             for c in fill.sources.keys() {
                 crate::set_cmds::add_channel(s, ts, *c)?;
             }
@@ -365,7 +327,7 @@ impl Session {
             s.target = crate::session::StackTarget::Content;
             Ok((lid, names))
         })?;
-        self.cache_decoded(names, maps);
+        self.cache_decoded(names, &m.maps);
         Ok(id)
     }
 
@@ -411,12 +373,10 @@ impl Session {
         })
     }
 
-    /// Swap in maps a [`LinkJob`] cooked (`.mcmat` bytes) and the values they were cooked with.
+    /// Install the maps and exposed values returned by a completed [`LinkJob`].
     /// With `merge`, this folds into the previous undo step when that was an edit of the same kind
     /// (a parameter set while the cook ran).
     pub fn apply_link_cook(&mut self, id: LayerId, material: &CookedMaterial, merge: bool) -> Result<()> {
-        let maps = decoded_maps(material)?;
-
         let names = self.edit_merging(EDIT, merge, |session| {
             let LayerKind::Fill(mut fill) = session.doc.project.layer(id)?.kind.clone() else {
                 return Err(EngineError::Other(format!("layer {} is not a fill", id.0)));
@@ -432,7 +392,7 @@ impl Session {
             let stem = texturecraft_formats::sanitize_resource_name(&link.name);
             let old_names: Vec<String> =
                 fill.sources.values().filter_map(|source| if let Source::Image { name, .. } = source { Some(name.clone()) } else { None }).collect();
-            let names = put_maps(session, &stem, &maps, &mut fill);
+            let names = put_maps(session, &stem, &material.maps, &mut fill);
             session.doc.project.layer_mut(id)?.kind = LayerKind::Fill(fill);
 
             // Duplicated layers may still use the earlier maps
@@ -450,16 +410,16 @@ impl Session {
         })?;
 
         // Reuse the validated maps before synchronization considers decoding missing images
-        self.cache_decoded(names, maps);
+        self.cache_decoded(names, &material.maps);
         self.sync_images();
 
         Ok(())
     }
 
     /// Keep the images decoded while validating maps instead of decoding them again.
-    fn cache_decoded(&mut self, names: Vec<String>, maps: Vec<(Channel, Vec<u8>, texturecraft_formats::DecodedImage)>) {
-        for (name, (_, _, img)) in names.into_iter().zip(maps) {
-            self.images.insert(name, crate::resource_cmds::decoded(img));
+    fn cache_decoded(&mut self, names: Vec<String>, maps: &[CookedMap]) {
+        for (name, map) in names.into_iter().zip(maps) {
+            self.images.insert(name, Arc::clone(&map.image));
         }
     }
 }
@@ -471,21 +431,24 @@ fn unique(s: &Session, name: &str) -> String {
 
 /// Store `maps` as new resources (names carry a fresh id, so the decoded-image cache never
 /// confuses two cooks) and point `fill`'s channels at them. Returns the names, in map order.
-fn put_maps(s: &mut Session, stem: &str, maps: &[(Channel, Vec<u8>, texturecraft_formats::DecodedImage)], fill: &mut Fill) -> Vec<String> {
+fn put_maps(s: &mut Session, stem: &str, maps: &[CookedMap], fill: &mut Fill) -> Vec<String> {
     let cook = s.doc.project.alloc_id().0;
     let mut names = Vec::new();
-    for (c, bytes, _) in maps {
-        let extension = if bytes.starts_with(&[0x76, 0x2f, 0x31, 0x01]) { "exr" } else { "png" };
-        let name = unique(s, &format!("{stem}_{}_{cook}.{extension}", c.id()));
-        s.doc.resources.insert(name.clone(), Arc::new(bytes.clone()));
-        // A normal map the user marked DirectX stays marked through re-cooks.
-        let normal_format = match fill.sources.get(c) {
+    for map in maps {
+        let channel = map.channel;
+        let extension = if map.bytes.starts_with(&[0x76, 0x2f, 0x31, 0x01]) { "exr" } else { "png" };
+        let name = unique(s, &format!("{stem}_{}_{cook}.{extension}", channel.id()));
+        s.doc.resources.insert(name.clone(), Arc::clone(&map.bytes));
+
+        // Preserve a normal convention the user chose for this layer
+        let normal_format = match fill.sources.get(&channel) {
             Some(Source::Image { normal_format, .. }) => *normal_format,
             _ => Default::default(),
         };
-        fill.sources.insert(*c, Source::Image { name: name.clone(), normal_format });
+        fill.sources.insert(channel, Source::Image { name: name.clone(), normal_format });
         names.push(name);
     }
+
     names
 }
 
