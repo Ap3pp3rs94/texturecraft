@@ -8,6 +8,8 @@ use crate::{BakedMap, BlendMode, Channel, ChannelKind, lum};
 
 mod curvature_detail;
 mod curvature_mode;
+mod decal_flip;
+mod decal_symmetry;
 mod generator_global;
 mod micro_detail;
 mod output_resolution;
@@ -15,6 +17,8 @@ mod resolution_mode;
 
 pub use curvature_detail::CurvatureDetail;
 pub use curvature_mode::CurvatureMode;
+pub use decal_flip::DecalFlip;
+pub use decal_symmetry::DecalSymmetry;
 pub use generator_global::GeneratorGlobal;
 pub use micro_detail::MicroDetail;
 pub use output_resolution::OutputResolution;
@@ -192,6 +196,18 @@ pub struct Decal {
     pub offset: [f32; 2],
     /// How far in front of and behind the frame the decal reaches (world units).
     pub depth: f32,
+    /// A mirrored copy of the decal on the other side of the mesh (None: no copy). The copy
+    /// follows this frame, so moving, scaling or turning the decal moves it too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symmetry: Option<DecalSymmetry>,
+    /// Mirror the image inside the frame: left to right (`[0]`), top to bottom (`[1]`). Old projects have neither.
+    #[serde(default, skip_serializing_if = "not_flipped")]
+    pub flip: [bool; 2],
+}
+
+/// Serde helper: a decal that mirrors nothing saves without the field
+fn not_flipped(flip: &[bool; 2]) -> bool {
+    !flip[0] && !flip[1]
 }
 
 impl Default for Projection {
@@ -348,8 +364,15 @@ impl Procedural {
 pub enum Source {
     /// A constant value (linear RGB for colors; `[v, v, v]` for scalars).
     Uniform([f32; 3]),
-    /// A procedural pattern mixing two values.
-    Procedural { pattern: Procedural, low: [f32; 3], high: [f32; 3] },
+    /// A procedural pattern mixing two values, or on a color channel colored by `ramp` when it
+    /// has stops (a gradient map: dark to light through evenly spaced linear RGB colors).
+    Procedural {
+        pattern: Procedural,
+        low: [f32; 3],
+        high: [f32; 3],
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        ramp: Vec<[f32; 3]>,
+    },
     /// An imported image resource, by name. `normal_format` is the convention of a normal map
     /// image (DirectX images have their green flipped where a normal channel samples them).
     Image {
@@ -358,8 +381,14 @@ pub enum Source {
         normal_format: crate::NormalFormat,
     },
     /// The stack value recorded by an anchor point effect (`anchor` is the effect id) for
-    /// `channel`; colors read as gray where a scalar is needed.
-    Anchor { anchor: LayerId, channel: Channel },
+    /// `channel`; colors read as gray where a scalar is needed. On a color channel a `ramp` with
+    /// stops recolors the value by its lightness (a gradient map).
+    Anchor {
+        anchor: LayerId,
+        channel: Channel,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        ramp: Vec<[f32; 3]>,
+    },
 }
 
 impl Source {
@@ -370,6 +399,14 @@ impl Source {
     /// Image resource `name` (an OpenGL normal map where a normal channel samples it).
     pub fn image(name: impl Into<String>) -> Source {
         Source::Image { name: name.into(), normal_format: crate::NormalFormat::OpenGl }
+    }
+
+    /// The gradient map stops of a procedural or anchor source (empty: none).
+    pub fn ramp(&self) -> &[[f32; 3]] {
+        match self {
+            Source::Procedural { ramp, .. } | Source::Anchor { ramp, .. } => ramp,
+            _ => &[],
+        }
     }
 
     /// The anchor point this source reads, if any.
@@ -1045,6 +1082,10 @@ pub enum EffectKind {
 pub struct PathShape {
     /// Surface positions (3D view) or texture coordinates with z = 0 (2D view).
     pub points: Vec<[f32; 3]>,
+    /// Per point: the curve turns sharply there instead of passing smoothly through. Empty (and absent from old
+    /// projects) when every point is smooth; a missing entry is smooth too.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub corners: Vec<bool>,
     pub uv: bool,
     pub closed: bool,
     /// A closed path fills its interior instead of stroking the curve.
@@ -1114,7 +1155,7 @@ impl EffectKind {
         let mut anchors: Vec<_> = sources
             .into_iter()
             .filter_map(|source| match source {
-                Source::Anchor { anchor, channel } => Some((*anchor, *channel)),
+                Source::Anchor { anchor, channel, .. } => Some((*anchor, *channel)),
                 _ => None,
             })
             .collect();
@@ -1164,7 +1205,7 @@ pub struct Effect {
 
 impl Effect {
     pub fn new(id: LayerId, kind: EffectKind) -> Effect {
-        // Generators and fills that build a mask usually add on top of the background.
+        // Generators and fills that build a mask usually add on top of the background
         Effect { id, name: kind.name().to_string(), visible: true, kind, blend: BlendMode::Normal, opacity: 1.0 }
     }
 }
@@ -1172,6 +1213,27 @@ impl Effect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_decal_saved_without_symmetry_loads_unchanged_and_saves_without_it() {
+        let old = r#"{"center":[0.0,0.0,1.0],"normal":[0.0,0.0,1.0],"up":[0.0,1.0,0.0],"size":[1.0,1.0],"rotation":0.0,"offset":[0.0,0.0],"depth":0.5}"#;
+        let decal: Decal = serde_json::from_str(old).unwrap();
+        assert_eq!(decal.symmetry, None);
+        assert_eq!(serde_json::to_string(&decal).unwrap(), old.replace(' ', ""), "nothing new is written for a decal without a copy");
+
+        let mirrored = Decal { symmetry: Some(DecalSymmetry { axis: 2, flip: DecalFlip::V, offset: 0.0 }), ..decal };
+        let json = serde_json::to_string(&mirrored).unwrap();
+        assert!(json.contains(r#""symmetry":{"axis":2,"flip":"v"}"#), "{json}");
+        assert_eq!(serde_json::from_str::<Decal>(&json).unwrap(), mirrored);
+        let without_flip = json.replace(r#","flip":"v""#, "");
+        assert_eq!(serde_json::from_str::<Decal>(&without_flip).unwrap().symmetry, Some(DecalSymmetry { axis: 2, flip: DecalFlip::None, offset: 0.0 }));
+
+        // The plane's offset is written only when it is not zero
+        let moved = Decal { symmetry: Some(DecalSymmetry { axis: 1, flip: DecalFlip::None, offset: -0.25 }), ..decal };
+        let json = serde_json::to_string(&moved).unwrap();
+        assert!(json.contains(r#""offset":-0.25}"#), "{json}");
+        assert_eq!(serde_json::from_str::<Decal>(&json).unwrap(), moved);
+    }
 
     #[test]
     fn material_effect_images_are_reported_as_used() {
@@ -1297,13 +1359,36 @@ mod tests {
     }
 
     #[test]
+    fn gradient_map_stops_round_trip_and_sources_without_them_save_as_before() {
+        let ramp = vec![[1.0, 0.0, 0.0], [0.0, 0.0, 1.0]];
+        let procedural = |ramp: Vec<[f32; 3]>| Source::Procedural { pattern: Procedural::new(ProceduralKind::Clouds), low: [0.25; 3], high: [0.75; 3], ramp };
+        let anchor = |ramp: Vec<[f32; 3]>| Source::Anchor { anchor: LayerId(7), channel: Channel::BaseColor, ramp };
+        for source in [procedural(ramp.clone()), anchor(ramp.clone())] {
+            let json = serde_json::to_value(&source).unwrap();
+            assert!(json.to_string().contains("\"ramp\""), "{json}");
+            assert_eq!(serde_json::from_value::<Source>(json).unwrap(), source);
+            assert_eq!(source.ramp(), ramp.as_slice());
+        }
+
+        // Empty ramps preserve older projects' JSON shape
+        let old_procedural = serde_json::json!({"Procedural": {"pattern": serde_json::to_value(Procedural::new(ProceduralKind::Clouds)).unwrap(), "low": [0.25, 0.25, 0.25], "high": [0.75, 0.75, 0.75]}});
+        let old_anchor = serde_json::json!({"Anchor": {"anchor": 7, "channel": "BaseColor"}});
+        for (old, source) in [(old_procedural, procedural(Vec::new())), (old_anchor, anchor(Vec::new()))] {
+            assert_eq!(serde_json::to_value(&source).unwrap(), old);
+            assert_eq!(serde_json::from_value::<Source>(old).unwrap(), source);
+            assert!(source.ramp().is_empty());
+        }
+        assert!(Source::Uniform([0.5; 3]).ramp().is_empty());
+    }
+
+    #[test]
     fn effect_targets_and_anchor_reads() {
         assert_eq!(EffectKind::Anchor.content_only(), None, "anchors go on content and masks");
         assert_eq!(EffectKind::Generator(Generator::new(GeneratorKind::Dirt)).content_only(), Some(false));
         assert_eq!(EffectKind::Filter(Filter::Invert).content_only(), None);
         let mut fill_layer = Layer::new(LayerId(1), "l", LayerKind::Paint, &[Channel::BaseColor]);
         assert!(!fill_layer.reads_anchor());
-        let source = Source::Anchor { anchor: LayerId(9), channel: Channel::Height };
+        let source = Source::Anchor { anchor: LayerId(9), channel: Channel::Height, ramp: Vec::new() };
         fill_layer.mask = Some(Mask {
             effects: vec![Effect::new(LayerId(2), EffectKind::Fill { source, projection: Projection::default() })],
             ..Mask::new(MaskBackground::Black)
@@ -1334,6 +1419,22 @@ mod tests {
         assert!(hm.apply(0.5, 0.1) > 0.5 && hm.apply(0.5, -0.1) < 0.5);
         assert!(HeightMask { offset: 0.5, ..hm }.apply(0.5, 0.0) > 0.5);
         assert_eq!(hm.apply(0.5, f32::NAN), 0.5);
+    }
+
+    #[test]
+    fn old_decals_load_unflipped_and_save_unchanged() {
+        let old = r#"{"center":[0.0,0.0,0.0],"normal":[0.0,0.0,1.0],"up":[0.0,1.0,0.0],"size":[1.0,2.0],"rotation":0.0,"offset":[0.0,0.0],"depth":0.5}"#;
+        let decal: Decal = serde_json::from_str(old).unwrap();
+        assert_eq!(decal.flip, [false, false]);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&serde_json::to_string(&decal).unwrap()).unwrap(),
+            serde_json::from_str::<serde_json::Value>(old).unwrap()
+        );
+
+        let flipped = Decal { flip: [true, false], ..decal };
+        let saved = serde_json::to_string(&flipped).unwrap();
+        assert!(saved.contains(r#""flip":[true,false]"#), "{saved}");
+        assert_eq!(serde_json::from_str::<Decal>(&saved).unwrap(), flipped);
     }
 
     #[test]

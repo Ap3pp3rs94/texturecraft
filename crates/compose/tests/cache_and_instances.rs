@@ -31,7 +31,7 @@ fn fixture() -> Fixture {
 }
 
 fn procedural(kind: ProceduralKind, low: f32, high: f32) -> Source {
-    Source::Procedural { pattern: Procedural::new(kind), low: [low; 3], high: [high; 3] }
+    Source::Procedural { pattern: Procedural::new(kind), low: [low; 3], high: [high; 3], ramp: Vec::new() }
 }
 
 fn add(f: &mut Fixture, ts: usize, kind: LayerKind, mask: Option<Mask>) -> LayerId {
@@ -196,11 +196,11 @@ fn instances_draw_their_source_across_texture_sets() {
 #[test]
 fn mask_with_height_follows_the_layer_height() {
     let mut f = fixture();
-    // A white layer over the default gray, half masked, its height falling from 0.25 (left) to
-    // -0.25 (right).
+
+    // Half masking makes the height fall from 0.25 at left to -0.25 at right
     let mut ramp = Procedural::new(ProceduralKind::Gradient);
     ramp.scale = 1.0;
-    let height = Source::Procedural { pattern: ramp, low: [0.25; 3], high: [-0.25; 3] };
+    let height = Source::Procedural { pattern: ramp, low: [0.25; 3], high: [-0.25; 3], ramp: Vec::new() };
     let id = add(&mut f, 0, fill(&[(Channel::BaseColor, Source::Uniform([1.0; 3])), (Channel::Height, height)]), None);
     let mut mask = Mask::new(MaskBackground::Black);
     mask.effects.push(effect(&mut f, EffectKind::Fill { source: Source::Uniform([0.5; 3]), projection: Projection::default() }));
@@ -214,7 +214,8 @@ fn mask_with_height_follows_the_layer_height() {
     assert!((v(&plain, left) - 0.75).abs() < 0.01 && (v(&plain, right) - 0.75).abs() < 0.01, "plain mask: 50 % white over gray");
     assert!(v(&hm, left) > 0.84, "high parts show first: {}", v(&hm, left));
     assert!(v(&hm, right) < 0.66, "low parts later: {}", v(&hm, right));
-    // Without a mask there is nothing to combine.
+
+    // Without a mask there is nothing to combine
     f.project.layer_mut(id).unwrap().mask.as_mut().unwrap().enabled = false;
     assert!((v(&reference(&f, 0), left) - 1.0).abs() < 1e-3);
 }
@@ -332,6 +333,7 @@ fn stroke(target: LayerId) -> StrokePreview {
         mask_value: 1.0,
         stencil: None,
         carried: BTreeMap::new(),
+        carried_mask: None,
     }
 }
 
@@ -406,9 +408,10 @@ fn anchor_readers_fall_back_to_full_evaluation() {
     let mut f = fixture();
     let n = nested_stack(&mut f);
     let anchor = effect(&mut f, EffectKind::Anchor);
-    let source = Source::Anchor { anchor: anchor.id, channel: Channel::Height };
+    let source = Source::Anchor { anchor: anchor.id, channel: Channel::Height, ramp: Vec::new() };
     f.project.layer_mut(n.base).unwrap().content_effects.push(anchor);
-    // A mask above the hot layer reads the stack below it.
+
+    // A mask above the hot layer reads the stack below it
     let reader = effect(&mut f, EffectKind::Fill { source, projection: Projection::default() });
     f.project.layer_mut(n.g2_above).unwrap().mask.as_mut().unwrap().effects.push(reader);
     for hot in [n.deep, n.top] {
@@ -512,21 +515,25 @@ fn anchors_inside_a_content_stack_record_the_content_up_to_them() {
     f.project.layer_mut(low).unwrap().content_effects.extend([mid, raise, end]);
     let top = add(&mut f, 0, LayerKind::Paint, None);
     paint_rect(&mut f, top, (0, 0), (60, 60), 0.3);
-    // Without readers the stack is cached (anchors are still recorded) and exact.
+
+    // Without readers the stack is cached (anchors are still recorded) and exact
     assert!(!check_cached(&f, 0, top).is_empty());
-    // Readers: roughness reads the anchor inside the stack, metallic the one at its end.
+
+    // Readers: roughness reads the anchor inside the stack, metallic the one at its end
     for (c, anchor) in [(Channel::Roughness, mid_id), (Channel::Metallic, end_id)] {
-        let reader = add(&mut f, 0, fill(&[(c, Source::Anchor { anchor, channel: Channel::Height })]), None);
+        let reader = add(&mut f, 0, fill(&[(c, Source::Anchor { anchor, channel: Channel::Height, ramp: Vec::new() })]), None);
         f.project.layer_mut(reader).unwrap().channels.retain(|x, _| *x == c);
     }
     let out = reference(&f, 0);
     let at = |c| out.value(c, 128, 128)[0];
-    // Half opacity over the default height 0: 0.4 before the raise, 0.8 after it.
+
+    // Half opacity over the default height 0: 0.4 before the raise, 0.8 after it
     assert!((at(Channel::Roughness) - 0.2).abs() < 2e-3, "inside the stack: {}", at(Channel::Roughness));
     assert!((at(Channel::Metallic) - 0.4).abs() < 2e-3, "at the end: {}", at(Channel::Metallic));
     assert!((at(Channel::Height) - 0.4).abs() < 2e-3);
     assert!(check_cached(&f, 0, top).is_empty(), "anchor readers evaluate everything");
-    // Behind a blur the cut reads the filtered field; before it, the unfiltered content.
+
+    // Behind a blur the cut reads the filtered field; before it, the unfiltered content
     let blur = effect(&mut f, EffectKind::Filter(Filter::Blur { radius: 30.0 }));
     f.project.layer_mut(low).unwrap().content_effects.insert(0, blur);
     let blurred = reference(&f, 0);

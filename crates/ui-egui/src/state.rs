@@ -1,7 +1,7 @@
 //! UI state (serde, so the control channel can read and drive it).
 
 use serde::{Deserialize, Serialize};
-use texturecraft_engine::core::{BakedMap, Channel, NormalFormat};
+use texturecraft_engine::core::{BakedMap, Channel, ChannelBlend, NormalFormat};
 
 use crate::docking::Dock;
 use crate::keymap::Keymap;
@@ -46,7 +46,7 @@ pub struct RenderUi {
 
 impl Default for RenderUi {
     fn default() -> Self {
-        // The web traces on one thread: fewer bounces keep it interactive.
+        // The web traces on one thread: fewer bounces keep it interactive
         RenderUi { max_samples: 256, bounces: if cfg!(target_arch = "wasm32") { 3 } else { 6 }, denoise: true, cpu: false }
     }
 }
@@ -79,15 +79,15 @@ pub struct Windows {
     /// Browser File › Export Mesh: the download format choice.
     #[serde(default)]
     pub export_mesh: bool,
-    /// The start window: new, open, recent projects (the app opens it at launch).
-    #[serde(skip)]
-    pub start: bool,
     /// Edit > Project Configuration: what is chosen so far, applied by OK.
     #[serde(skip)]
     pub project_config: Option<ProjectConfig>,
     /// What waits on the unsaved-changes dialog: save, don't save or cancel.
     #[serde(skip)]
     pub unsaved: Option<Unsaved>,
+    /// Window ▸ Reset UI is waiting for its answer.
+    #[serde(skip)]
+    pub confirm_reset_ui: bool,
 }
 
 /// An action that replaces or ends the project, held while the project has unsaved changes.
@@ -122,8 +122,6 @@ pub struct Prefs {
     pub accent: crate::theme::Accent,
     /// The system draws the window's title bar instead of TextureCraft (desktop; read at startup).
     pub system_title_bar: bool,
-    /// Show the start window at launch.
-    pub start_window: bool,
     /// Where autosaves, smart materials, presets, templates and layouts go (desktop; read at
     /// startup). Empty or relative: `Documents/TextureCraft`.
     pub data_folder: String,
@@ -146,7 +144,6 @@ impl Default for Prefs {
             brightness: crate::theme::Brightness::default(),
             accent: crate::theme::Accent::default(),
             system_title_bar: false,
-            start_window: true,
             data_folder: String::new(),
             reserved_cores: 1,
             project_open_limit_gib: texturecraft_engine::formats::DEFAULT_PROJECT_OPEN_LIMIT_GIB,
@@ -235,6 +232,9 @@ pub struct ExportUi {
     /// Output templates tab: the new name while renaming the selected preset.
     #[serde(skip)]
     pub renaming: Option<String>,
+    /// Output templates tab: the question waiting for an answer (delete, or drop an unsaved edit).
+    #[serde(skip)]
+    pub ask: Option<crate::export_templates::Ask>,
 }
 
 impl Default for ExportUi {
@@ -253,6 +253,7 @@ impl Default for ExportUi {
             tab: 0,
             draft: None,
             renaming: None,
+            ask: None,
         }
     }
 }
@@ -272,11 +273,19 @@ fn default_export_dir() -> String {
 fn default_split_ratio() -> f32 {
     0.5
 }
+
+/// Settings that start on, for saved states that predate them
+fn default_true() -> bool {
+    true
+}
 /// The bake layout's version: saved bake docks from an older one load as `Dock::for_baking`
 const BAKE_LAYOUT_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct UiState {
+    /// Layer menu ▸ Blending options ▸ Copy: each channel's blend mode and opacity of the copied layer.
+    #[serde(skip)]
+    pub blend_clipboard: Option<Vec<(Channel, ChannelBlend)>>,
     pub mode: Mode,
     pub layout: ViewLayout,
     /// The 3D view's share of the viewport width in the split layout
@@ -332,6 +341,9 @@ pub struct UiState {
     /// Show the mesh wireframe over the 3D view.
     #[serde(default)]
     pub wireframe_3d: bool,
+    /// Show the orbit, pan and zoom buttons in the corner of the 3D and 2D views (Viewport menu)
+    #[serde(default = "default_true")]
+    pub nav_buttons: bool,
     #[serde(default)]
     pub render: RenderUi,
     #[serde(default)]
@@ -350,9 +362,18 @@ pub struct UiState {
     /// How the 3D view shows symmetry
     #[serde(default)]
     pub symmetry: crate::symmetry::SymmetryDisplay,
+    /// The brush, symmetry and other tool settings of the last session, which the next one starts with
+    #[serde(default)]
+    pub tool_settings: texturecraft_engine::ToolSettings,
     /// The Baking Visualization panel's settings, under a key of their own since the reference defaults: older saved ones start over
     #[serde(default, rename = "baking_visualization")]
     pub bake_visualization: crate::bake_mode::BakeVisualizationToggles,
+    /// Panel arrangements saved under a name (Window > Layouts), in the order they were saved
+    #[serde(default)]
+    pub named_layouts: Vec<crate::named_layouts::NamedLayout>,
+    /// The save, replace or manage dialog of the named layouts
+    #[serde(skip)]
+    pub layout_dialog: Option<crate::named_layouts::LayoutDialog>,
 }
 
 impl UiState {
@@ -378,6 +399,15 @@ impl UiState {
         self.bake_layout_version = BAKE_LAYOUT_VERSION;
     }
 
+    /// Put the panels, tabs and floating panels of both modes back to their defaults; the view split,
+    /// zoom, wireframes, symmetry display, mode and every setting stay as they are
+    pub fn reset_panel_layout(&mut self) {
+        let (painting, baking) = (Dock::default(), Dock::for_baking());
+        (self.dock, self.inactive_mode_dock) = if self.dock_is_baking { (baking, painting) } else { (painting, baking) };
+        self.bake_layout_version = BAKE_LAYOUT_VERSION;
+        self.rail_panel = None;
+    }
+
     /// Take `layout`'s panels, windows and view settings, keeping this state's dialogs, settings, files and shelf query
     pub fn adopt_layout(&mut self, layout: UiState) {
         let keep = std::mem::replace(self, layout);
@@ -385,7 +415,11 @@ impl UiState {
         self.export = keep.export;
         self.recent = keep.recent;
         self.prefs = keep.prefs;
+        self.nav_buttons = keep.nav_buttons;
         self.keymap = keep.keymap;
+        self.tool_settings = keep.tool_settings;
+        self.named_layouts = keep.named_layouts;
+        self.layout_dialog = None;
         self.rename = None;
 
         // The shelf's search, type and folder are one query, and saved searches are the user's own
@@ -413,6 +447,7 @@ impl Default for UiState {
             uv_zoom: 1.0,
             uv_pan: [0.0, 0.0],
             layer_channel: Channel::BaseColor,
+            blend_clipboard: None,
             shelf_filter: String::new(),
             shelf_tab: 0,
             shelf_path: Vec::new(),
@@ -425,6 +460,7 @@ impl Default for UiState {
             new_project: NewProject::default(),
             uv_wireframe: true,
             wireframe_3d: false,
+            nav_buttons: true,
             render: RenderUi::default(),
             prefs: Prefs::default(),
             export: ExportUi::default(),
@@ -432,7 +468,10 @@ impl Default for UiState {
             keymap: Keymap::new(),
             bake_paint_brush: crate::bake_mode::BakePaintBrush::default(),
             symmetry: crate::symmetry::SymmetryDisplay::default(),
+            tool_settings: Default::default(),
             bake_visualization: crate::bake_mode::BakeVisualizationToggles::default(),
+            named_layouts: Vec::new(),
+            layout_dialog: None,
         }
     }
 }
@@ -455,6 +494,29 @@ mod tests {
         assert_eq!(ui.recent, vec!["a.tcraft".to_string()]);
         assert_eq!(ui.export.preset, "Mine");
         assert_eq!(ui.keymap.get("file.save").map(String::as_str), Some("F5"));
+    }
+
+    #[test]
+    fn resetting_the_panel_layout_restores_both_docks_and_keeps_the_rest() {
+        for baking in [false, true] {
+            let mode = if baking { Mode::Baking } else { Mode::Painting };
+            let mut ui = UiState { mode, ..UiState::default() };
+            ui.sync_mode_dock();
+            ui.dock.close(crate::docking::Panel::Log);
+            ui.inactive_mode_dock.close(crate::docking::Panel::Log);
+            ui.layout = ViewLayout::Only3D;
+            ui.uv_zoom = 3.0;
+            ui.wireframe_3d = true;
+            ui.recent = vec!["a.tcraft".into()];
+
+            ui.reset_panel_layout();
+
+            let mut fresh = UiState { mode, ..UiState::default() };
+            fresh.sync_mode_dock();
+            assert_eq!((&ui.dock, &ui.inactive_mode_dock), (&fresh.dock, &fresh.inactive_mode_dock), "baking: {baking}");
+            assert_eq!((ui.layout, ui.uv_zoom, ui.wireframe_3d, ui.mode), (ViewLayout::Only3D, 3.0, true, mode));
+            assert_eq!(ui.recent, vec!["a.tcraft".to_string()]);
+        }
     }
 
     #[test]

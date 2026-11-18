@@ -791,3 +791,53 @@ fn unparseable_color_param_returns_error() {
     let err = execute(&mut s, "tool.click", &json!({"uv": [0.2, 0.8, 0.4]})).unwrap_err();
     assert_eq!(err.to_string(), "`tool.click`: a 2D view point needs `uv` as [u, v]");
 }
+
+#[test]
+fn resetting_a_stencil_puts_back_its_placement_only() {
+    let mut stencil = texturecraft_engine::StencilState::new("logo.png");
+    stencil.center = [0.4, -0.2];
+    stencil.scale = 2.0;
+    stencil.rotation = 30.0;
+    stencil.opacity = 0.9;
+    stencil.tile = true;
+    stencil.reset_placement();
+    assert_eq!((stencil.center, stencil.scale, stencil.rotation, stencil.opacity, stencil.tile), ([0.0, 0.0], 0.8, 0.0, 0.9, true));
+}
+
+#[test]
+fn blending_set_gives_each_channel_its_own_mode_and_opacity_in_one_undo_step() {
+    let mut s = session();
+    let layer = execute(&mut s, "layer.add.paint", &json!({})).unwrap()["layer"].as_u64().unwrap();
+    let read = |s: &Session| s.doc.project.layers[&texturecraft_engine::core::LayerId(layer)].channels.clone();
+    let before = read(&s);
+    execute(
+        &mut s,
+        "layer.blending.set",
+        &json!({"layer": layer, "channels": {"baseColor": {"mode": "Multiply", "opacity": 0.25}, "roughness": {"opacity": 0.5}}}),
+    )
+    .unwrap();
+    let after = read(&s);
+    assert_eq!((after[&Channel::BaseColor].mode, after[&Channel::BaseColor].opacity), (texturecraft_engine::core::BlendMode::Multiply, 0.25));
+    assert_eq!((after[&Channel::Roughness].mode, after[&Channel::Roughness].opacity), (before[&Channel::Roughness].mode, 0.5));
+    assert_eq!(after[&Channel::Metallic], before[&Channel::Metallic], "channels not listed stay as they were");
+    execute(&mut s, "edit.undo", &Value::Null).unwrap();
+    assert_eq!(read(&s), before, "one undo step restores every listed channel");
+    execute(&mut s, "edit.redo", &Value::Null).unwrap();
+
+    // A channel the layer has disabled stays disabled
+    execute(&mut s, "layer.blend", &json!({"layer": layer, "channel": "metallic", "enabled": false})).unwrap();
+    execute(&mut s, "layer.blending.set", &json!({"layer": layer, "channels": {"metallic": {"opacity": 0.1}}})).unwrap();
+    assert!(!read(&s).contains_key(&Channel::Metallic));
+    let stable = read(&s);
+    for bad in [
+        json!({"layer": layer}),
+        json!({"layer": layer, "channels": {"nope": {}}}),
+        json!({"layer": layer, "channels": {"baseColor": {"mode": "Multiply"}, "nope": {}}}),
+        json!({"layer": layer, "channels": {"baseColor": {"mode": "???"}}}),
+    ] {
+        assert!(execute(&mut s, "layer.blending.set", &bad).is_err(), "{bad}");
+        assert_eq!(read(&s), stable, "an error changes nothing");
+    }
+    execute(&mut s, "layer.blending.set", &json!({"layer": layer, "channels": {"baseColor": {"opacity": 2.0}, "roughness": {"opacity": -1.0}}})).unwrap();
+    assert_eq!((read(&s)[&Channel::BaseColor].opacity, read(&s)[&Channel::Roughness].opacity), (1.0, 0.0), "opacity is clamped");
+}

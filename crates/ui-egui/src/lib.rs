@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+mod ask;
 mod bake_job;
 pub mod bake_mode;
 mod bake_scene;
@@ -25,14 +26,24 @@ pub mod gpu;
 mod grid_tile;
 pub mod i18n;
 pub mod id_color_pick;
+mod inactive_set_hint;
 pub mod keymap;
 pub mod layer_panel;
+mod layout_dialog;
 mod levels_editor;
 mod levels_handle;
 mod levels_properties;
+mod line_snap;
+mod list_action;
 mod mask_preview_image;
 mod material_preview_image;
 pub mod menus;
+mod name_error;
+mod named_layout;
+pub mod named_layouts;
+mod nav_button;
+pub mod nav_buttons;
+mod nav_view;
 pub mod new_project_advanced;
 mod orb_shape;
 pub mod parity;
@@ -61,8 +72,11 @@ pub mod shelf_preview;
 mod shelf_tabs;
 mod shelf_toolbar;
 pub mod shelf_view;
+#[cfg(not(target_arch = "wasm32"))]
+mod smart_mask_menu;
 mod soft_box;
 pub mod state;
+mod surface_paint_point;
 pub mod symmetry;
 pub mod theme;
 pub mod thumbs;
@@ -133,6 +147,8 @@ pub struct TextureCraftApp {
     pub session: Session,
     /// A smooth move to a saved camera in progress.
     camera_glide: Option<CameraGlide>,
+    /// Yaw and pitch an Alt+Shift drag has reached before snapping to 90° steps (see `viewport`).
+    orbit_snap: Option<(f32, f32)>,
     pub ui: UiState,
     /// Where `ui` is saved between runs
     ui_store: ui_state_store::UiStateStore,
@@ -162,8 +178,8 @@ pub struct TextureCraftApp {
     pub ui_ms: f32,
     /// Frame timing and the scripted paint test (`debug.*` control methods).
     pub profiler: profile::Profiler,
-    /// Where the last 3D stroke ended (viewport pixels), for Shift+click straight lines.
-    pub last_paint_point: Option<texturecraft_engine::geom::glam::Vec2>,
+    /// Where the last 3D stroke ended on the model, scoped to its mesh and texture set, for Shift+click straight lines.
+    pub last_paint_point: Option<uv_paint_point::SurfacePaintPoint>,
     /// The last finished 2D stroke's endpoint, scoped to its mesh and texture set for Shift+click lines
     pub last_paint_uv: Option<uv_paint_point::UvPaintPoint>,
     /// The decal layer the next click in the 3D view places.
@@ -172,6 +188,8 @@ pub struct TextureCraftApp {
     pub properties_popup: Option<properties_popup::PropertiesPopup>,
     /// The color selection the next click in the 3D or 2D view picks an ID color for
     pub picking_id_color: Option<id_color_pick::IdColorPick>,
+    /// Whether the next click on the model places the symmetry planes (Pick point in the symmetry settings)
+    pub picking_symmetry_plane: bool,
     /// The wgpu state (screenshots read the renderer's targets).
     pub render_state: Option<eframe::egui_wgpu::RenderState>,
     /// CJK fallback fonts for the UI language.
@@ -204,9 +222,24 @@ pub struct TextureCraftApp {
     pub(crate) bindings: keymap::Bindings,
 }
 
+/// The UI state to start with: the saved one, whose tool settings go to `session`, else the defaults in the OS language
+pub(crate) fn start_ui(saved: Option<UiState>, session: &mut Session) -> UiState {
+    match saved {
+        Some(ui) => {
+            ui.tool_settings.apply(&mut session.tool);
+            ui
+        }
+        None => {
+            let mut ui = UiState::default();
+            ui.prefs.language = i18n::os_language().into();
+            ui
+        }
+    }
+}
+
 impl TextureCraftApp {
     /// The app around `session`, with the saved UI state (or defaults in the OS language) and the GPU viewport.
-    pub fn new(cc: &eframe::CreationContext<'_>, session: Session) -> TextureCraftApp {
+    pub fn new(cc: &eframe::CreationContext<'_>, mut session: Session) -> TextureCraftApp {
         theme::install(&cc.egui_ctx);
 
         // Bakes cast their rays on a GPU device of their own (created on the first bake)
@@ -216,16 +249,19 @@ impl TextureCraftApp {
 
         // The first run speaks the OS (or browser) language
         let mut ui_store = ui_state_store::UiStateStore::new(ui_state_store::FILE.get().cloned());
-        let ui = ui_store.load(cc.storage).unwrap_or_else(|| {
-            let mut ui = UiState::default();
-            ui.prefs.language = i18n::os_language().into();
-            ui
-        });
+        let mut ui = start_ui(ui_store.load(cc.storage), &mut session);
+
+        // No window opens by itself with no project (a saved layout may have left Export open)
+        if !session.project_open {
+            ui.windows.export = false;
+        }
+
         let next_autosave = ui.prefs.autosave_minutes as f64 * 60.0;
         ui.prefs.apply_resource_limits();
 
         let mut app = TextureCraftApp {
             camera_glide: None,
+            orbit_snap: None,
             session,
             ui,
             ui_store,
@@ -252,6 +288,7 @@ impl TextureCraftApp {
             placing_decal: None,
             properties_popup: None,
             picking_id_color: None,
+            picking_symmetry_plane: false,
             render_state: cc.wgpu_render_state.clone(),
             fonts: fonts::UiFonts::default(),
             banner: None,
@@ -303,28 +340,47 @@ impl TextureCraftApp {
         self.ui.prefs.apply_resource_limits();
         #[cfg(not(target_arch = "wasm32"))]
         if id == "material.load"
+            && self.session.project_open
             && let Some(path) = params.get("path").and_then(Value::as_str)
             && link_import::is_procedural(path)
         {
             return self.start_link_import(path, &params);
         }
 
-        // Going to a saved camera glides there; the control channel and CLI jump straight away
-        let glide_from = (id.starts_with("camera.select") || id.starts_with("camera.bookmark")).then_some(self.session.camera);
+        // Going to a saved camera or a fixed view glides there; the control channel and CLI jump straight away
+        let glides = id.starts_with("camera.select") || id.starts_with("camera.bookmark") || id.starts_with("camera.view");
+        let before = self.session.camera;
+        let glide_from = glides.then_some(before);
         match texturecraft_engine::execute(&mut self.session, id, &params) {
             Ok(value) => {
                 if matches!(id, "brush.preset.store" | "brush.preset.rename" | "brush.preset.delete") {
                     self.thumbs.forget_saved_files();
                 }
 
-                // A pending dialog must not import its old source into the replacement project
-                if matches!(id, "file.open" | "file.close" | "project.new" | "project.sample") {
+                // Pending work and thumbnail snapshots belong to the old project
+                if matches!(id, "file.open" | "file.new" | "file.close" | "project.new" | "project.sample") {
                     self.pbr_import = None;
+                    self.resize = None;
+                    #[cfg(not(target_arch = "wasm32"))]
+                    self.link_imports.clear();
+                    self.layer_panel = Default::default();
                 }
 
-                if let Some(from) = glide_from.filter(|camera| *camera != self.session.camera) {
-                    self.camera_glide = Some(CameraGlide { from, to: self.session.camera, start: self.last_time });
-                    self.session.camera = from;
+                // The empty state has no baking or rendering to show
+                if id == "file.close" {
+                    self.ui.mode = state::Mode::Painting;
+                    self.ui.windows.export = false;
+                }
+
+                match glide_from {
+                    Some(from) if from != self.session.camera => {
+                        self.camera_glide = Some(CameraGlide { from, to: self.session.camera, start: self.last_time });
+                        self.session.camera = from;
+                    }
+
+                    // Already at the destination: drop a glide an earlier command in the same frame started
+                    Some(_) => self.camera_glide = None,
+                    None => self.settle_camera_glide(id, before),
                 }
 
                 Some(value)
@@ -333,6 +389,21 @@ impl TextureCraftApp {
                 self.toast(error.to_string(), true);
                 None
             }
+        }
+    }
+
+    /// After command `id` ran without starting a glide (the camera was `before`): a projection switch
+    /// carries over into a running glide, which would otherwise put back the projection it recorded;
+    /// any other command that moved the camera, or named where it should be, ends the glide, which
+    /// would put the camera back or carry it on to the glide's old destination.
+    pub(crate) fn settle_camera_glide(&mut self, id: &str, before: texturecraft_engine::geom::OrbitCamera) {
+        if matches!(id, "camera.perspective" | "camera.orthographic") {
+            if let Some(glide) = &mut self.camera_glide {
+                glide.from.ortho = self.session.camera.ortho;
+                glide.to.ortho = self.session.camera.ortho;
+            }
+        } else if self.session.camera != before || sets_camera(id) {
+            self.camera_glide = None;
         }
     }
 
@@ -533,6 +604,7 @@ impl TextureCraftApp {
         if self.resize.is_some() {
             return;
         }
+
         match self.session.resize_task(ts, resolution) {
             Ok(task) => {
                 let progress = Arc::new(Progress::new());
@@ -546,10 +618,18 @@ impl TextureCraftApp {
     /// Apply a finished resize (after any stroke in progress ends).
     fn poll_resize(&mut self, ctx: &egui::Context) {
         let Some(job) = &self.resize else { return };
+
+        // Nothing to resize without a project (a result that arrives after Close is dropped)
+        if !self.session.project_open {
+            self.resize = None;
+            return;
+        }
+
         ctx.request_repaint_after(std::time::Duration::from_millis(30));
         if self.session.stroke_active() {
             return;
         }
+
         let result = match job.rx.try_recv() {
             Ok(r) => r,
             Err(std::sync::mpsc::TryRecvError::Empty) => return,
@@ -621,14 +701,17 @@ impl TextureCraftApp {
     #[cfg(not(target_arch = "wasm32"))]
     fn autosave(&mut self, now: f64) {
         let period = self.ui.prefs.autosave_minutes as f64 * 60.0;
-        // The clock starts at the first unsaved change.
+
+        // The clock starts at the first unsaved change
         if period <= 0.0 || !self.session.modified {
             self.next_autosave = now + period;
             return;
         }
+
         if now < self.next_autosave {
             return;
         }
+
         self.next_autosave = now + period;
         let dir = user_dir("autosave");
         let path = dir.join(format!(
@@ -650,6 +733,13 @@ impl TextureCraftApp {
             log::warn!("could not start autosave: {e}");
         }
     }
+}
+
+/// Whether command `id` puts the camera at a place it names (a view, a saved camera, explicit values or
+/// framing), so a glide toward an earlier destination must not go on even when the camera is already there
+fn sets_camera(id: &str) -> bool {
+    matches!(id, "camera.set" | "camera.orbit" | "camera.select")
+        || ["camera.view.", "camera.bookmark", "viewport.frame"].iter().any(|prefix| id.starts_with(prefix))
 }
 
 /// A smooth move of the viewport camera (see [`TextureCraftApp::run`]).
@@ -675,7 +765,8 @@ impl TextureCraftApp {
         c.pitch = mix(a.pitch, b.pitch);
         c.distance = mix(a.distance, b.distance);
         c.fov = mix(a.fov, b.fov);
-        // Orthographic switches at the end (the projections cannot be blended).
+
+        // Switch orthographic mode at the end because projections cannot blend
         c.ortho = if t >= 1.0 { b.ortho } else { a.ortho };
         self.session.camera = c;
         self.session.revision = self.session.revision.wrapping_add(1);
@@ -693,6 +784,7 @@ impl eframe::App for TextureCraftApp {
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        self.ui.tool_settings = texturecraft_engine::ToolSettings::of(&self.session.tool);
         self.ui_store.save(&self.ui, storage);
         self.report_ui_storage_warning();
         export_templates::save_library(self, storage);
@@ -781,7 +873,13 @@ impl eframe::App for TextureCraftApp {
     #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        let t0 = now_ms();
+        let started_ms = now_ms();
+
+        // Baking and rendering need a project (a saved layout may start in one of them)
+        if !self.session.project_open {
+            self.ui.mode = state::Mode::Painting;
+        }
+
         if !self.ui.hide_ui {
             titlebar::show(self, ui);
             banner(self, ui);
@@ -792,21 +890,23 @@ impl eframe::App for TextureCraftApp {
                 toolbar::rail(self, ui);
             }
         }
-        let hide = self.ui.hide_ui;
-        let tk = theme::Tokens::get(&ctx);
+        let hide_ui = self.ui.hide_ui;
+        let tokens = theme::Tokens::get(&ctx);
+
         // The dock keeps the cards' gutter from the bars and rails around it
-        let panel_frame = if hide { egui::Frame::NONE.fill(tk.viewport) } else { egui::Frame::NONE.fill(tk.chrome).inner_margin(theme::GUTTER) };
-        egui::CentralPanel::default().frame(panel_frame).show(ui, |ui| if hide { viewport::central(self, ui) } else { docking::show(self, ui) });
+        let panel_frame = if hide_ui { egui::Frame::NONE.fill(tokens.viewport) } else { egui::Frame::NONE.fill(tokens.chrome).inner_margin(theme::GUTTER) };
+        egui::CentralPanel::default().frame(panel_frame).show(ui, |ui| if hide_ui { viewport::central(self, ui) } else { docking::show(self, ui) });
         windows::show(self, &ctx);
         #[cfg(not(target_arch = "wasm32"))]
         updates_ui::show(self, &ctx);
         toasts(self, &ctx);
         #[cfg(not(target_arch = "wasm32"))]
         self.file_dialogs.show_pending(frame);
-        let end = now_ms();
-        let dt = (end - t0) as f32;
-        self.ui_ms = if self.ui_ms == 0.0 { dt } else { self.ui_ms * 0.9 + dt * 0.1 };
-        self.profiler.end_frame(end, dt);
+
+        let ended_ms = now_ms();
+        let elapsed_ms = (ended_ms - started_ms) as f32;
+        self.ui_ms = if self.ui_ms == 0.0 { elapsed_ms } else { self.ui_ms * 0.9 + elapsed_ms * 0.1 };
+        self.profiler.end_frame(ended_ms, elapsed_ms);
     }
 }
 

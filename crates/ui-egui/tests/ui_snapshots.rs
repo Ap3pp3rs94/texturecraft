@@ -23,12 +23,83 @@ fn select_map(harness: &mut Harness<'_, TextureCraftApp>, name: &str) {
     harness.run_steps(3);
 }
 
-fn save(h: &mut Harness<'_, TextureCraftApp>, dir: &Path, name: &str) {
-    h.run_steps(6);
-    let img = h.render().unwrap_or_else(|e| panic!("{name}: {e}"));
+fn save(harness: &mut Harness<'_, TextureCraftApp>, dir: &Path, name: &str) {
+    harness.run_steps(6);
+    let img = harness.render().unwrap_or_else(|e| panic!("{name}: {e}"));
     let path = dir.join(format!("{name}.png"));
     img.save(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     eprintln!("wrote {}", path.display());
+}
+
+#[test]
+#[ignore]
+fn empty_start_snapshot() {
+    let Some(output_dir) = std::env::var_os("TC_UI_SNAPSHOTS").map(PathBuf::from) else { return };
+    std::fs::create_dir_all(&output_dir).unwrap();
+    let session = texturecraft_engine::Session::closed().unwrap();
+    let mut harness = Harness::builder().with_size(egui::vec2(1600.0, 960.0)).build_eframe(|context| TextureCraftApp::new(context, session));
+    harness.state_mut().ui.prefs.language = "en".into();
+
+    save(&mut harness, &output_dir, "empty-start");
+}
+
+/// Closing rejects a same-frame capture, then releases both rendered view targets.
+#[test]
+#[ignore]
+fn close_releases_view_targets_and_rejects_immediate_capture() {
+    let session = texturecraft_engine::Session::closed().unwrap();
+    let mut harness = Harness::builder().with_size(egui::vec2(960.0, 640.0)).wgpu().build_eframe(|context| TextureCraftApp::new(context, session));
+    harness.state_mut().ui.prefs.language = "en".into();
+
+    for mesh in ["cube", "plane"] {
+        assert!(harness.state_mut().run("project.new", serde_json::json!({"mesh": mesh, "resolution": 128})).is_some());
+        harness.state_mut().ui.layout = texturecraft_ui_egui::state::ViewLayout::Split;
+        harness.run_steps(4);
+        harness.render().unwrap();
+        let render_state = harness.state().render_state.as_ref().unwrap().clone();
+        let report = |stage: &str| {
+            render_state.device.poll(eframe::wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
+            if let Some(report) = render_state.device.generate_allocator_report() {
+                eprintln!(
+                    "{mesh} {stage}: {} live GPU allocations, {} allocated bytes, {} reserved bytes",
+                    report.allocations.len(),
+                    report.total_allocated_bytes,
+                    report.total_reserved_bytes
+                );
+            } else {
+                eprintln!("{mesh} {stage}: allocator report unavailable on this backend");
+            }
+        };
+        assert!(texturecraft_ui_egui::control::screenshot(harness.state(), texturecraft_ui_egui::viewport::VIEW_3D).is_some());
+        assert!(texturecraft_ui_egui::control::screenshot(harness.state(), texturecraft_ui_egui::viewport::VIEW_2D).is_some());
+        report("before close");
+        let ctx = harness.ctx.clone();
+
+        let reply = texturecraft_ui_egui::control::handle(harness.state_mut(), &ctx, "command.run", &serde_json::json!({"id": "file.close"}));
+
+        assert_eq!(reply["ok"], true);
+        assert!(texturecraft_ui_egui::control::screenshot(harness.state(), texturecraft_ui_egui::viewport::VIEW_3D).is_none());
+        {
+            let renderer = render_state.renderer.read();
+            let gpu = renderer.callback_resources.get::<texturecraft_ui_egui::gpu::GpuState>().unwrap();
+            assert!(
+                gpu.renderer.read_view(&render_state.device, &render_state.queue, texturecraft_ui_egui::viewport::VIEW_3D).is_some(),
+                "the stale target still exists before the next UI frame"
+            );
+        }
+
+        harness.run_steps(2);
+        harness.render().unwrap();
+
+        {
+            let renderer = render_state.renderer.read();
+            let gpu = renderer.callback_resources.get::<texturecraft_ui_egui::gpu::GpuState>().unwrap();
+            for view in [texturecraft_ui_egui::viewport::VIEW_3D, texturecraft_ui_egui::viewport::VIEW_2D] {
+                assert!(gpu.renderer.read_view(&render_state.device, &render_state.queue, view).is_none());
+            }
+        }
+        report("after close");
+    }
 }
 
 /// Check the saved-brush controls without a GPU adapter

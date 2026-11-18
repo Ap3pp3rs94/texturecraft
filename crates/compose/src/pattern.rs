@@ -1,6 +1,6 @@
 //! Procedural patterns and projections.
 
-use texturecraft_core::{Decal, Procedural, ProceduralKind, Projection};
+use texturecraft_core::{Decal, DecalFlip, Procedural, ProceduralKind, Projection};
 use texturecraft_geom::glam::{Vec2, Vec3};
 use texturecraft_texel::noise;
 
@@ -332,8 +332,38 @@ pub fn decal_uv(d: &Decal, p: Vec3, nrm: Vec3) -> Option<(Vec2, f32)> {
     if facing <= 0.0 || lx.abs() > 0.5 || ly.abs() > 0.5 || lz > depth || !(lx.is_finite() && ly.is_finite()) {
         return None;
     }
+
     let w = smoothstep(0.0, 0.3, facing) * (1.0 - smoothstep(0.75 * depth, depth, lz));
-    Some((Vec2::new(lx + 0.5, 0.5 - ly), w))
+    Some((flip_uv(Vec2::new(lx + 0.5, 0.5 - ly), d.flip), w))
+}
+
+/// `uv` with the image mirrored left to right (`flip[0]`) and/or top to bottom (`flip[1]`) inside the frame.
+fn flip_uv(uv: Vec2, flip: [bool; 2]) -> Vec2 {
+    Vec2::new(if flip[0] { 1.0 - uv.x } else { uv.x }, if flip[1] { 1.0 - uv.y } else { uv.y })
+}
+
+/// [`decal_uv`] for a decal with a mirrored copy: whichever of the decal and its copy covers the
+/// point more. The copy is the decal reflected through the plane across `center` (the mesh
+/// center), so a point is looked up as its reflection (the plane is `offset` away from the center) and the image flipped as asked.
+pub fn decal_uv_symmetric(d: &Decal, p: Vec3, nrm: Vec3, center: Vec3) -> Option<(Vec2, f32)> {
+    let direct = decal_uv(d, p, nrm);
+    let Some(symmetry) = d.symmetry else { return direct };
+    let axis = usize::from(symmetry.axis.min(2));
+    let (mut mirrored_position, mut mirrored_normal) = (p, nrm);
+    mirrored_position[axis] = 2.0 * (center[axis] + symmetry.offset) - p[axis];
+    mirrored_normal[axis] = -nrm[axis];
+    let mirrored = decal_uv(d, mirrored_position, mirrored_normal).map(|(uv, w)| {
+        let uv = match symmetry.flip {
+            DecalFlip::None => uv,
+            DecalFlip::U => Vec2::new(1.0 - uv.x, uv.y),
+            DecalFlip::V => Vec2::new(uv.x, 1.0 - uv.y),
+        };
+        (uv, w)
+    });
+    match (direct, mirrored) {
+        (Some(a), Some(b)) => Some(if b.1 > a.1 { b } else { a }),
+        (a, b) => a.or(b),
+    }
 }
 
 /// World-space noise used by generators (seamless across UV islands).
@@ -361,6 +391,8 @@ mod tests {
                 rotation: 0.0,
                 offset: [0.0; 2],
                 depth: 1.0,
+                symmetry: None,
+                flip: [false; 2],
             }),
         ];
         for k in ProceduralKind::ALL {
@@ -461,14 +493,25 @@ mod tests {
 
     #[test]
     fn decals_cover_their_frame_facing_them() {
-        let d = Decal { center: [0.0; 3], normal: [0.0, 0.0, 1.0], up: [0.0, 1.0, 0.0], size: [2.0, 1.0], rotation: 0.0, offset: [0.0; 2], depth: 0.5 };
+        let d = Decal {
+            center: [0.0; 3],
+            normal: [0.0, 0.0, 1.0],
+            up: [0.0, 1.0, 0.0],
+            size: [2.0, 1.0],
+            rotation: 0.0,
+            offset: [0.0; 2],
+            depth: 0.5,
+            symmetry: None,
+            flip: [false; 2],
+        };
         let z = Vec3::Z;
         let (uv, w) = decal_uv(&d, Vec3::new(0.5, 0.25, 0.0), z).unwrap();
         assert!((uv - Vec2::new(0.75, 0.25)).length() < 1e-5 && (w - 1.0).abs() < 1e-5, "{uv} {w}");
         assert!(decal_uv(&d, Vec3::new(1.1, 0.0, 0.0), z).is_none(), "outside the frame");
         assert!(decal_uv(&d, Vec3::ZERO, -z).is_none(), "back faces");
         assert!(decal_uv(&d, Vec3::new(0.0, 0.0, 0.6), z).is_none(), "beyond the depth");
-        // Rotated a quarter turn and shifted: the frame turns with it.
+
+        // Rotated a quarter turn and shifted: the frame turns with it
         let r = Decal { rotation: 90.0, offset: [1.0, 0.0], ..d };
         let (uv, _) = decal_uv(&r, Vec3::new(1.0, 0.9, 0.0), z).unwrap();
         assert!((uv.x - 0.95).abs() < 1e-4 && (uv.y - 0.5).abs() < 1e-4, "{uv}");
@@ -476,6 +519,32 @@ mod tests {
         assert!((c[0] - Vec3::new(-1.0, 0.5, 0.0)).length() < 1e-5 && (c[2] - Vec3::new(1.0, -0.5, 0.0)).length() < 1e-5);
         assert!(decal_axes(&Decal { normal: [0.0; 3], ..d }).is_none());
         assert!(decal_uv(&Decal { size: [f32::NAN; 2], ..d }, Vec3::ZERO, z).is_none());
+    }
+
+    #[test]
+    fn decals_mirror_their_image_inside_the_frame() {
+        let d = Decal {
+            center: [0.0; 3],
+            normal: [0.0, 0.0, 1.0],
+            up: [0.0, 1.0, 0.0],
+            size: [2.0, 1.0],
+            rotation: 0.0,
+            offset: [0.0; 2],
+            depth: 0.5,
+            symmetry: None,
+            flip: [false; 2],
+        };
+        let (left, top) = (Vec3::new(-0.5, 0.25, 0.0), Vec3::Z);
+        let uv = |flip: [bool; 2]| decal_uv(&Decal { flip, ..d }, left, top).unwrap().0;
+        assert!((uv([false, false]) - Vec2::new(0.25, 0.25)).length() < 1e-5);
+        assert!((uv([true, false]) - Vec2::new(0.75, 0.25)).length() < 1e-5, "Flip U mirrors left to right only");
+        assert!((uv([false, true]) - Vec2::new(0.25, 0.75)).length() < 1e-5, "Flip V mirrors top to bottom only");
+        assert!((uv([true, true]) - Vec2::new(0.75, 0.75)).length() < 1e-5);
+
+        // The frame itself does not move: coverage is the same flipped or not
+        let covered = |flip: [bool; 2], p: Vec3| decal_uv(&Decal { flip, ..d }, p, top).map(|(_, w)| w);
+        assert_eq!(covered([true, true], left), covered([false, false], left));
+        assert_eq!(covered([true, true], Vec3::new(1.1, 0.0, 0.0)), None);
     }
 
     #[test]

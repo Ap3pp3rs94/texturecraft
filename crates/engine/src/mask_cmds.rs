@@ -273,11 +273,12 @@ pub(crate) fn anchor_source(s: &Session, cmd: &str, reader: LayerId, anchor: Lay
         Some((owner, e)) if matches!(e.kind, EffectKind::Anchor) => owner,
         _ => return Err(bad(cmd, format!("{} is not an anchor point", anchor.0))),
     };
+
     let (ts, _, _) = s.doc.project.locate(reader).ok_or_else(|| bad(cmd, "layer not in a stack"))?;
     let order: Vec<LayerId> = s.doc.project.walk(ts).into_iter().map(|(id, _)| id).collect();
     let pos = |id: LayerId| order.iter().position(|x| *x == id);
     match (pos(owner), pos(reader)) {
-        (Some(o), Some(r)) if o < r => Ok(Source::Anchor { anchor, channel }),
+        (Some(o), Some(r)) if o < r => Ok(Source::Anchor { anchor, channel, ramp: Vec::new() }),
         _ => Err(bad(cmd, "the anchor point must be on a layer below this one in the same texture set")),
     }
 }
@@ -334,7 +335,7 @@ fn add_fill(session: &mut Session, params: &Value) -> Result<Value> {
                 pattern.seed = seed as u32;
             }
 
-            Source::Procedural { pattern, low: [0.0; 3], high: [1.0; 3] }
+            Source::Procedural { pattern, low: [0.0; 3], high: [1.0; 3], ramp: Vec::new() }
         }
         None => Source::Uniform([f32p(params, "value").unwrap_or(1.0).clamp(0.0, 1.0); 3]),
     };
@@ -591,7 +592,7 @@ fn set(session: &mut Session, params: &Value) -> Result<Value> {
     let anchor = match session.doc.project.effect(effect) {
         Some((owner, Effect { kind: EffectKind::Fill { source, .. }, .. })) => {
             let (current, channel) = match source {
-                Source::Anchor { anchor, channel } => (Some(*anchor), *channel),
+                Source::Anchor { anchor, channel, .. } => (Some(*anchor), *channel),
                 _ => (None, Channel::Height),
             };
             let channel_param = channel_param(CMD, params, "anchorChannel")?;

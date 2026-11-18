@@ -71,7 +71,7 @@ impl TextureCraftApp {
                 continue;
             }
 
-            if let Place::Above(target, _) = job.place
+            if let Place::Above(target, _) | Place::Below(target) = job.place
                 && !self.session.doc.project.locate(target).is_some_and(|(set, _, _)| set == job.set)
             {
                 self.toast("Material import canceled because the target layer changed", true);

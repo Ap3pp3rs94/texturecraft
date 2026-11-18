@@ -25,7 +25,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Add smart material from file",
             [],
             None,
-            "{path: .tcmat smart material, .mcmat MaterialCraft material or .mcraft package, above?: layer id, inside?: bool, index?: n} — above the selection by default, or placed like material.apply",
+            "{path: .tcmat smart material, .mcmat MaterialCraft material or .mcraft package, above?: layer id, inside?: bool, below?: layer id, top?: true, index?: n} — above the selection by default, or placed like material.apply",
             always,
             load
         ),
@@ -59,24 +59,33 @@ pub(crate) fn images_used(project: &Project, id: LayerId, out: &mut Vec<String>,
     }
 }
 
+/// An empty document with one texture set shaped like `src_set` (size, tiles, channels): what a saved library file holds.
+pub(crate) fn one_set_document(src_set: &TextureSet, name: &str) -> Document {
+    let mut project = Project::new(name, "builtin:none");
+    let mut set = TextureSet::new(name, 0, src_set.resolution);
+    set.uv_tiles = src_set.uv_tiles.clone();
+    set.tile_resolutions = src_set.tile_resolutions.clone();
+    set.channels = src_set.channels.clone();
+    project.texture_sets.push(set);
+    Document { bake_paint: BTreeMap::new(), project, pixels: PixelStore::default(), baked: BTreeMap::new(), resources: BTreeMap::new() }
+}
+
 impl Session {
     /// Serialize layer `id` (with children, pixels and images) as a smart material file.
     pub fn smart_material_bytes(&self, id: LayerId, name: &str) -> Result<Vec<u8>> {
         let (ts, _, _) = self.doc.project.locate(id).ok_or_else(|| EngineError::Other("layer not in a stack".into()))?;
-        let src_set = self.doc.project.texture_set(ts)?;
-        let mut project = Project::new(name, "builtin:none");
-        let mut set = TextureSet::new(name, 0, src_set.resolution);
-        set.uv_tiles = src_set.uv_tiles.clone();
-        set.tile_resolutions = src_set.tile_resolutions.clone();
-        set.channels = src_set.channels.clone();
-        project.texture_sets.push(set);
-        let mut mini = Document { bake_paint: BTreeMap::new(), project, pixels: PixelStore::default(), baked: BTreeMap::new(), resources: BTreeMap::new() };
+        let mut mini = one_set_document(self.doc.project.texture_set(ts)?, name);
         let new = crate::layer_ops::copy_tree(&self.doc, id, &mut mini, 0, None, false, 0)?;
         if let Ok(l) = mini.project.layer_mut(new) {
             l.name = name.to_string();
         }
+        self.file_bytes(mini, new)
+    }
+
+    /// The smart material file holding `mini` (a document from [`one_set_document`]) and the images layer `root` of it uses.
+    pub(crate) fn file_bytes(&self, mini: Document, root: LayerId) -> Result<Vec<u8>> {
         let mut used = Vec::new();
-        images_used(&mini.project, new, &mut used, 0);
+        images_used(&mini.project, root, &mut used, 0);
         let resources = used.iter().filter_map(|n| self.doc.resources.get(n).map(|b| (n.clone(), b.as_ref().clone()))).collect();
         let pf = texturecraft_formats::ProjectFile {
             project: mini.project,
@@ -104,6 +113,7 @@ impl Session {
         if texturecraft_formats::mcmat::is_mcmat(bytes) || texturecraft_formats::mcmat::is_mcraft(bytes) {
             return self.add_linked_material_bytes_at(bytes, place);
         }
+
         let pf = texturecraft_formats::load_project_bytes(bytes).map_err(fe)?;
         let root = pf
             .project
@@ -122,7 +132,7 @@ impl Session {
             let inside = sel.and_then(|l| s.doc.project.layer(l).ok()).is_some_and(|l| l.is_group());
             let id = crate::layer_ops::copy_tree(&src, root, &mut s.doc, ts, sel, inside, 0)?;
             place.apply(s, id)?;
-            s.selected.insert(ts, id);
+            s.select_one(ts, id);
             s.target = StackTarget::Content;
             Ok(id)
         })?;
