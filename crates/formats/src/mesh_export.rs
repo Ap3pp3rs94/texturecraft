@@ -291,7 +291,10 @@ mod tests {
     #[test]
     fn obj_with_mtl_links_all_material_texture_slots() {
         let mesh = texturecraft_geom::primitives::cube(1.0);
-        let file = |name: &str| ExportedFile { name: name.into(), bytes: vec![1, 2, 3], width: 1, height: 1, warnings: Vec::new() };
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::write_buffer_with_format(&mut png, &[200u8, 200, 200], 1, 1, image::ColorType::Rgb8, image::ImageFormat::Png).unwrap();
+        let png_bytes = png.into_inner();
+        let file = |name: &str| ExportedFile { name: name.into(), bytes: png_bytes.clone(), width: 1, height: 1, warnings: Vec::new() };
         let textures = vec![vec![
             file("BaseColor.png"),
             file("Roughness.png"),
