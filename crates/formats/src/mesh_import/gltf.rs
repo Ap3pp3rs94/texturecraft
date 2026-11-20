@@ -108,6 +108,7 @@ struct Attrs {
     colors: Vec<Vec4>,
     color_seen: bool,
     seen_materials: HashSet<String>,
+    triangles: usize,
 }
 
 fn add_part(
@@ -123,7 +124,8 @@ fn add_part(
     if tris.is_empty() {
         return Ok(());
     }
-    check_triangles(raw.triangle_count(), tris.len())?;
+    check_triangles(attrs.triangles, tris.len())?;
+    attrs.triangles += tris.len();
 
     let linear_transform = Mat3::from_mat4(transform);
     let normal_transform = linear_transform.inverse().transpose();

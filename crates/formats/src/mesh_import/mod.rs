@@ -435,14 +435,19 @@ fn geometry(raw: RawMesh) -> Result<(Mesh, Vec<String>, Option<Vec<Vec2>>)> {
     check_triangles(0, groups.iter().map(|(_, _, g)| g.len() / 3).sum())?;
 
     let mut mesh = Mesh { positions, ..Mesh::default() };
+    let mut material_ids: HashMap<String, usize> = HashMap::new();
     let mut groups: Vec<(usize, String, Vec<u32>)> = groups
         .into_iter()
         .filter(|(_, _, g)| g.len() >= 3)
         .map(|(material, part, tris)| {
-            let m = mesh.materials.iter().position(|x| *x == material).unwrap_or(mesh.materials.len());
-            if m == mesh.materials.len() {
-                mesh.materials.push(material);
-            }
+            let m = match material_ids.entry(material) {
+                Entry::Occupied(e) => *e.get(),
+                Entry::Vacant(e) => {
+                    let m = mesh.materials.len();
+                    mesh.materials.push(e.key().clone());
+                    *e.insert(m)
+                }
+            };
             (m, part, tris)
         })
         .collect();

@@ -714,3 +714,29 @@ fn base_color_filters_hdr_before_clamping_to_eight_bits() {
     assert_eq!((w, h), expected.dimensions());
     assert_eq!(actual, expected.pixels().map(|p| p.0).collect::<Vec<_>>());
 }
+
+#[test]
+fn duplicate_gltf_material_names_keep_first_wins_and_order() {
+    let mut raw = RawMesh {
+        positions: vec![Vec3::ZERO, Vec3::X, Vec3::Y],
+        base_colors: vec![
+            RawBaseColor { material: "Dup".into(), factor: Vec4::new(1.0, 0.0, 0.0, 1.0), image: None },
+            RawBaseColor { material: "Dup".into(), factor: Vec4::new(0.0, 0.0, 1.0, 1.0), image: None },
+            RawBaseColor { material: "Second".into(), factor: Vec4::new(0.0, 1.0, 0.0, 1.0), image: None },
+        ],
+        ..RawMesh::default()
+    };
+    raw.group("Dup", "p1").extend_from_slice(&[0, 1, 2]);
+    raw.group("Second", "p2").extend_from_slice(&[0, 1, 2]);
+    raw.group("Dup", "p3").extend_from_slice(&[0, 1, 2]);
+    let colors = std::mem::take(&mut raw.base_colors);
+    let (mesh, _, _) = geometry(raw).unwrap();
+    assert_eq!(mesh.materials, vec!["Dup", "Second"]);
+    let submesh_materials: Vec<_> = mesh.submeshes.iter().map(|s| (s.name.as_str(), s.material)).collect();
+    assert_eq!(submesh_materials, [("p1", 0), ("p3", 0), ("p2", 1)]);
+    let mut color_by_material: HashMap<&str, &RawBaseColor> = HashMap::with_capacity(colors.len());
+    for color in &colors {
+        color_by_material.entry(color.material.as_str()).or_insert(color);
+    }
+    assert_eq!(color_by_material.get("Dup").unwrap().factor, Vec4::new(1.0, 0.0, 0.0, 1.0));
+}
