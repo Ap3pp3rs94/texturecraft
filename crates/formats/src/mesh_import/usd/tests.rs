@@ -3,8 +3,7 @@
 use std::io::Read as _;
 
 use craft_usd::scene::{
-    Budget, MAX_DECODED_BYTES, MAX_DEPTH, Prop, SceneError, UsdAttr, UsdLayer, UsdPrim, UsdValue, Val, read_layer, read_layer_with_budget, write_usda,
-    write_usdc,
+    Budget, MAX_DECODED_BYTES, Prop, SceneError, UsdAttr, UsdLayer, UsdPrim, UsdValue, Val, read_layer, read_layer_with_budget, write_usda, write_usdc,
 };
 use texturecraft_geom::Mesh;
 use texturecraft_geom::glam::{Vec2, Vec3, Vec4};
@@ -706,14 +705,15 @@ fn usd_decoded_limits_and_budget_enforced_for_text_and_binary() {
         assert!(matches!(read_layer_with_budget(bytes, &mut budget), Err(SceneError::TooLarge(_))), "{label}");
     }
 
-    let mut deep = String::from("#usda 1.0\n");
-    for i in 0..=MAX_DEPTH {
-        deep.push_str(&format!("def Xform \"N{i}\" {{\n"));
+    let mut instanced = String::from("#usda 1.0\n");
+    for i in 0..20 {
+        let next = i + 1;
+        instanced.push_str(&format!(
+            "class Xform \"L{i}\" {{\n    def Xform \"A\" (references = </L{next}>) {{}}\n    def Xform \"B\" (references = </L{next}>) {{}}\n}}\n"
+        ));
     }
-    for _ in 0..=MAX_DEPTH {
-        deep.push_str("}\n");
-    }
-    let err = import_mesh_bytes("deep.usda", deep.as_bytes()).unwrap_err();
+    instanced.push_str("class Xform \"L20\" {}\ndef Xform \"Root\" (references = </L0>) {}\n");
+    let err = import_mesh_bytes("instanced.usda", instanced.as_bytes()).unwrap_err();
     assert!(matches!(err, FormatError::TooLarge(_)), "{err:?}");
 }
 
