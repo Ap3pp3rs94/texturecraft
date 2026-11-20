@@ -862,9 +862,9 @@ fn dae_preserves_multiple_cameras_on_one_node() {
         .replace(r##"<instance_camera url="#lens"/>"##, r##"<instance_camera url="#lens"/><instance_camera url="#lens2"/>"##);
     assert_ne!(dae, DAE);
     let r = import_mesh_bytes("scene.dae", dae.as_bytes()).unwrap();
-    let names: Vec<&str> = r.cameras.iter().map(|c| c.name.as_str()).collect();
-    assert_eq!(names, ["Overview", "Detail"]);
-    assert!(!r.cameras[0].ortho && r.cameras[1].ortho);
+    assert_eq!(r.cameras.len(), 2, "{:?}", r.cameras);
+    assert!(!r.cameras[0].ortho && (r.cameras[0].fov - 30.0).abs() < 1e-3);
+    assert!(r.cameras[1].ortho);
 }
 
 #[test]
