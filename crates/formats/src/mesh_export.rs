@@ -276,6 +276,57 @@ mod tests {
     }
 
     #[test]
+    fn glb_writer_rejects_empty_mesh_and_invalid_corner_indices() {
+        let mut empty = texturecraft_geom::primitives::cube(1.0);
+        empty.positions.clear();
+        assert!(matches!(glb_bytes(&empty, "empty", &[]).unwrap_err(), FormatError::Invalid(_)));
+
+        let mut invalid = texturecraft_geom::primitives::cube(1.0);
+        invalid.indices[0] = u32::MAX;
+        let error = glb_bytes(&invalid, "invalid", &[]).unwrap_err();
+        assert!(matches!(error, FormatError::Invalid(_)));
+        assert!(error.to_string().contains("corner index is out of range"), "{error}");
+    }
+
+    #[test]
+    fn obj_with_mtl_links_all_material_texture_slots() {
+        let mesh = texturecraft_geom::primitives::cube(1.0);
+        let file = |name: &str| ExportedFile { name: name.into(), bytes: vec![1, 2, 3], width: 1, height: 1, warnings: Vec::new() };
+        let textures = vec![vec![
+            file("BaseColor.png"),
+            file("Roughness.png"),
+            file("Metallic.png"),
+            file("Normal.png"),
+            file("Emissive.png"),
+            file("Opacity.png"),
+            file("Clearcoat.png"),
+            file("ClearcoatRoughness.png"),
+        ]];
+        let (obj, files) = obj_with_mtl(&mesh, "project", "cube", &textures).unwrap();
+        let obj = String::from_utf8(obj).unwrap();
+        assert!(obj.contains("mtllib cube.mtl\n"));
+        assert!(obj.contains("usemtl Cube\n"));
+        let mtl = String::from_utf8(files[0].1.clone()).unwrap();
+        assert_eq!(files[0].0, "cube.mtl");
+        for (key, slot) in [
+            ("map_Kd", "BaseColor"),
+            ("map_Pr", "Roughness"),
+            ("map_Pm", "Metallic"),
+            ("norm", "Normal"),
+            ("map_Bump", "Normal"),
+            ("map_Ke", "Emissive"),
+            ("map_d", "Opacity"),
+            ("map_Pc", "Clearcoat"),
+            ("map_Pcr", "ClearcoatRoughness"),
+        ] {
+            let expected = format!("{key} cube_Cube_{slot}.png");
+            assert!(mtl.lines().any(|line| line == expected), "missing `{expected}` in:\n{mtl}");
+        }
+        assert!(mtl.contains("Ke 1 1 1\nmap_Ke cube_Cube_Emissive.png"));
+        assert_eq!(files.len(), 9);
+    }
+
+    #[test]
     fn name_with_newline_stays_in_the_header_comment() {
         let mesh = texturecraft_geom::primitives::cube(1.0);
         let name = "a\nv 9 9 9\r\nmtllib x";

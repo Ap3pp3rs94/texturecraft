@@ -141,23 +141,61 @@ pub(crate) fn create_temp(path: &std::path::Path) -> Result<(std::path::PathBuf,
 /// Write `bytes` to `path` atomically: a new temporary file first, then rename over the target.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    write_batch_atomic([(path, bytes)])
+}
+
+/// Write every `(path, bytes)` pair atomically: stage and sync all temporary files first, verify
+/// no target path is a directory, and only then rename them into place. On any failure before
+/// publication, all staged temporary files are removed and no target file is created or modified.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn write_batch_atomic<'a>(entries: impl IntoIterator<Item = (&'a std::path::Path, &'a [u8])>) -> Result<()> {
     use std::io::Write;
 
-    let (temporary_path, mut file) = create_temp(path)?;
-    let result = file.write_all(bytes).and_then(|_| file.sync_all());
-    drop(file);
+    let mut staged: Vec<(std::path::PathBuf, &'a std::path::Path)> = Vec::new();
+    let cleanup = |staged: &[(std::path::PathBuf, &std::path::Path)]| {
+        for (temp_path, _) in staged {
+            let _ = std::fs::remove_file(temp_path);
+        }
+    };
 
-    let result = result.and_then(|_| std::fs::rename(&temporary_path, path));
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temporary_path);
+    for (path, bytes) in entries {
+        if path.is_dir() {
+            cleanup(&staged);
+            return Err(FormatError::Io(std::io::Error::other(format!("{} is a directory", path.display()))));
+        }
+        let (temporary_path, mut file) = match create_temp(path) {
+            Ok(pair) => pair,
+            Err(error) => {
+                cleanup(&staged);
+                return Err(error);
+            }
+        };
+        let write_result = file.write_all(bytes).and_then(|_| file.sync_all());
+        drop(file);
+        if let Err(error) = write_result {
+            let _ = std::fs::remove_file(&temporary_path);
+            cleanup(&staged);
+            return Err(error.into());
+        }
+        staged.push((temporary_path, path));
     }
 
-    Ok(result?)
+    for index in 0..staged.len() {
+        let (ref temporary_path, target_path) = staged[index];
+        if let Err(error) = std::fs::rename(temporary_path, target_path) {
+            for (remaining_temp, _) in &staged[index..] {
+                let _ = std::fs::remove_file(remaining_temp);
+            }
+            return Err(error.into());
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(all(test, unix))]
 mod atomic_tests {
-    use super::write_atomic;
+    use super::{write_atomic, write_batch_atomic};
 
     #[test]
     fn write_atomic_does_not_follow_a_planted_temp_symlink() -> std::io::Result<()> {
@@ -173,6 +211,25 @@ mod atomic_tests {
 
         assert_eq!(std::fs::read(&victim)?, b"safe");
         assert_eq!(std::fs::read(&target)?, b"new");
+
+        let _ = std::fs::remove_dir_all(&directory);
+        Ok(())
+    }
+
+    #[test]
+    fn write_batch_atomic_publishes_nothing_on_failure() -> std::io::Result<()> {
+        let directory = std::env::temp_dir().join(format!("tc-batch-atomic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory)?;
+        let existing = directory.join("existing.png");
+        std::fs::write(&existing, b"old")?;
+        let blocked = directory.join("blocked_dir");
+        std::fs::create_dir_all(&blocked)?;
+
+        let result = write_batch_atomic([(existing.as_path(), b"new".as_slice()), (blocked.as_path(), b"data".as_slice())]);
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&existing)?, b"old");
+        assert!(std::fs::read_dir(&directory)?.all(|entry| !entry.unwrap().file_name().to_string_lossy().ends_with(".tmp")));
 
         let _ = std::fs::remove_dir_all(&directory);
         Ok(())

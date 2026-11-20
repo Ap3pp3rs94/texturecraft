@@ -166,4 +166,45 @@ mod tests {
         assert!(mesh_map_png(0, 1, &[]).is_err());
         assert!(mesh_map_png(2, 2, &[0.0; 8]).is_err());
     }
+
+    #[test]
+    fn mesh_maps_encode_gray16_and_rgb16_with_exact_png_headers() {
+        let decode_raw_16 = |bytes: &[u8]| {
+            let decoder = png::Decoder::new(Cursor::new(bytes));
+            let mut reader = decoder.read_info().unwrap();
+            let info = reader.info().clone();
+            let mut buf = vec![0u8; reader.output_buffer_size().unwrap()];
+            let frame = reader.next_frame(&mut buf).unwrap();
+            let samples: Vec<u16> = buf[..frame.buffer_size()].chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
+            (info, samples)
+        };
+
+        let gray = mesh_map_png(2, 1, &[-0.5, 0.25, 0.5, 1.5]).unwrap();
+        let (gray_info, gray_samples) = decode_raw_16(&gray);
+        assert_eq!(gray_info.bit_depth, png::BitDepth::Sixteen);
+        assert_eq!(gray_info.color_type, png::ColorType::Grayscale);
+        assert_eq!(gray_samples, [0, 16384, 32768, 65535]);
+
+        let rgb = mesh_map_png(2, 3, &[0.0, 0.25, 0.5, 1.0, 0.75, 0.125, 0.5, 0.5, 0.5, 0.0, 1.0, 0.0]).unwrap();
+        let (rgb_info, rgb_samples) = decode_raw_16(&rgb);
+        assert_eq!(rgb_info.bit_depth, png::BitDepth::Sixteen);
+        assert_eq!(rgb_info.color_type, png::ColorType::Rgb);
+        assert_eq!(rgb_samples, [0, 16384, 32768, 65535, 49151, 8192, 32768, 32768, 32768, 0, 65535, 0]);
+    }
+
+    #[test]
+    fn write_mesh_map_png_propagates_writer_errors() {
+        struct FailingWriter;
+        impl Write for FailingWriter {
+            fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "disk full"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let error = write_mesh_map_png(FailingWriter, 2, 1, &[0.0, 0.25, 0.5, 1.0]).unwrap_err();
+        assert!(matches!(error, FormatError::Invalid(_)), "{error}");
+    }
 }

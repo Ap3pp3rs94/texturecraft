@@ -1534,25 +1534,22 @@ fn keep_first_names<T>(files: Vec<T>, name: impl Fn(&T) -> &str, warnings: impl 
     kept
 }
 
-/// Write exported files into `dir` (created if missing), each atomically (`name.tmp`, then
-/// rename). Names must be plain file names.
+/// Write exported files into `dir` (created if missing), atomically as a batch so a validation
+/// or write failure publishes nothing. Names must be plain file names.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn write_files(files: &[ExportedFile], dir: &std::path::Path) -> Result<Vec<std::path::PathBuf>> {
     std::fs::create_dir_all(dir)?;
-    files
-        .iter()
-        .map(|f| {
-            // Cap the sanitized stem before adding the extension
-            let (stem, ext) = f.name.rsplit_once('.').unwrap_or((&f.name, ""));
-            if f.name.is_empty() || stem != sanitize_file_stem(stem) || !ext.chars().all(|c| c.is_ascii_alphanumeric()) || f.name.trim_matches('.').is_empty() {
-                return Err(FormatError::Invalid(format!("\"{}\" is not a plain file name", f.name)));
-            }
-
-            let path = dir.join(&f.name);
-            crate::write_atomic(&path, &f.bytes)?;
-            Ok(path)
-        })
-        .collect()
+    let mut targets = Vec::with_capacity(files.len());
+    for f in files {
+        // Cap the sanitized stem before adding the extension
+        let (stem, ext) = f.name.rsplit_once('.').unwrap_or((&f.name, ""));
+        if f.name.is_empty() || stem != sanitize_file_stem(stem) || !ext.chars().all(|c| c.is_ascii_alphanumeric()) || f.name.trim_matches('.').is_empty() {
+            return Err(FormatError::Invalid(format!("\"{}\" is not a plain file name", f.name)));
+        }
+        targets.push((dir.join(&f.name), f.bytes.as_slice()));
+    }
+    crate::write_batch_atomic(targets.iter().map(|(path, bytes)| (path.as_path(), *bytes)))?;
+    Ok(targets.into_iter().map(|(path, _)| path).collect())
 }
 
 #[cfg(test)]
