@@ -175,7 +175,7 @@ mod tests {
             let info = reader.info().clone();
             let mut buf = vec![0u8; reader.output_buffer_size().unwrap()];
             let frame = reader.next_frame(&mut buf).unwrap();
-            let samples: Vec<u16> = buf[..frame.buffer_size()].chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
+            let samples: Vec<u16> = buf[..frame.buffer_size()].as_chunks::<2>().0.iter().copied().map(u16::from_be_bytes).collect();
             (info, samples)
         };
 
