@@ -200,37 +200,47 @@ fn write_batch_atomic_with_hook<'a>(
     }
 
     let mut published: Vec<(&std::path::Path, Option<std::path::PathBuf>)> = Vec::with_capacity(staged.len());
-    let rollback = |published: &mut Vec<(&std::path::Path, Option<std::path::PathBuf>)>, remaining: &[(std::path::PathBuf, &std::path::Path)]| {
+    let rollback = |published: &mut Vec<(&std::path::Path, Option<std::path::PathBuf>)>,
+                    remaining: &[(std::path::PathBuf, &std::path::Path)],
+                    cause: std::io::Error|
+     -> FormatError {
+        let mut incomplete = Vec::new();
         for (target_path, backup_path) in published.drain(..).rev() {
             if let Some(backup) = backup_path {
-                let _ = std::fs::rename(&backup, target_path);
-            } else {
-                let _ = std::fs::remove_file(target_path);
+                if let Err(err) = std::fs::rename(&backup, target_path) {
+                    incomplete.push(format!("{} (backup at {}): {err}", target_path.display(), backup.display()));
+                }
+            } else if let Err(err) = std::fs::remove_file(target_path) {
+                incomplete.push(format!("{}: {err}", target_path.display()));
             }
         }
         cleanup_staged(remaining);
+        if incomplete.is_empty() {
+            FormatError::Io(cause)
+        } else {
+            FormatError::Io(std::io::Error::other(format!("{cause}; incomplete rollback: {}", incomplete.join("; "))))
+        }
     };
 
     for index in 0..staged.len() {
         let target_path = staged[index].1;
         if let Err(error) = before_rename(index, target_path) {
-            rollback(&mut published, &staged[index..]);
-            return Err(error.into());
+            return Err(rollback(&mut published, &staged[index..], error));
         }
         let backup_path = if std::fs::symlink_metadata(target_path).is_ok() {
             let (backup, backup_file) = match create_temp_excluding(target_path, &reserved) {
                 Ok(pair) => pair,
                 Err(error) => {
-                    rollback(&mut published, &staged[index..]);
-                    return Err(error);
+                    let cause = std::io::Error::other(error.to_string());
+                    return Err(rollback(&mut published, &staged[index..], cause));
                 }
             };
             drop(backup_file);
             reserved.insert(backup.clone());
-            if let Err(error) = std::fs::rename(target_path, &backup) {
+            // Copy to backup so `target_path` stays intact until `rename` atomically replaces it.
+            if let Err(error) = std::fs::copy(target_path, &backup) {
                 let _ = std::fs::remove_file(&backup);
-                rollback(&mut published, &staged[index..]);
-                return Err(error.into());
+                return Err(rollback(&mut published, &staged[index..], error));
             }
             Some(backup)
         } else {
@@ -238,10 +248,9 @@ fn write_batch_atomic_with_hook<'a>(
         };
         if let Err(error) = std::fs::rename(&staged[index].0, target_path) {
             if let Some(backup) = backup_path {
-                let _ = std::fs::rename(&backup, target_path);
+                let _ = std::fs::remove_file(&backup);
             }
-            rollback(&mut published, &staged[index..]);
-            return Err(error.into());
+            return Err(rollback(&mut published, &staged[index..], error));
         }
         published.push((target_path, backup_path));
     }
