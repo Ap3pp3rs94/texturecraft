@@ -182,6 +182,26 @@ enum RollbackBackup {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+fn target_matches_bytes(target_path: &std::path::Path, expected_bytes: &[u8]) -> bool {
+    use std::io::Read;
+
+    let Ok(meta) = std::fs::symlink_metadata(target_path) else { return false };
+    if !meta.file_type().is_file() {
+        return false;
+    }
+    let Ok(file) = std::fs::File::open(target_path) else { return false };
+    let Ok(handle_meta) = file.metadata() else { return false };
+    if !handle_meta.file_type().is_file() {
+        return false;
+    }
+    let mut buf = Vec::with_capacity(expected_bytes.len().min(4096));
+    if file.take(expected_bytes.len() as u64 + 1).read_to_end(&mut buf).is_err() {
+        return false;
+    }
+    buf.as_slice() == expected_bytes
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn write_batch_atomic_with_hook<'a>(
     entries: impl IntoIterator<Item = (&'a std::path::Path, &'a [u8])>,
     mut before_rename: impl FnMut(usize, &std::path::Path) -> std::io::Result<()>,
@@ -245,8 +265,7 @@ fn write_batch_atomic_with_hook<'a>(
         let mut incomplete = Vec::new();
         for (target_path, expected_bytes, backup) in published.drain(..).rev() {
             // Do not overwrite if an external writer modified the target after we published it.
-            let still_ours = std::fs::read(target_path).ok().as_deref() == Some(expected_bytes);
-            if !still_ours {
+            if !target_matches_bytes(target_path, expected_bytes) {
                 if let Some(RollbackBackup::File(backup_path)) = backup {
                     incomplete.push(format!("{} (modified by another writer; backup at {})", target_path.display(), backup_path.display()));
                 } else {
