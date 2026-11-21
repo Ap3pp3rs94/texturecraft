@@ -411,6 +411,6 @@ fn long_transform_chains_import() {
 #[test]
 fn nesting_past_the_limit_is_an_error() {
     let bytes = nested_xform_chain(MAX_DEPTH + 1);
-    let err = read(&bytes).unwrap_err();
+    let Err(err) = read(&bytes) else { panic!("expected TooLarge, got Ok") };
     assert!(matches!(err, FormatError::TooLarge(_)), "expected TooLarge, got {err:?}");
 }
