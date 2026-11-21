@@ -10,6 +10,9 @@ use crate::{FormatError, Result, malformed};
 
 const KIND: &str = "Alembic";
 const DEFAULT_MATERIAL: &str = "Default";
+/// Real-world Alembic files (e.g. Blender's `long-names.abc`) exceed 64 nested transforms; 256
+/// accommodates them while keeping `craft-mesh`'s recursive walk stack-safe and bounded.
+const MAX_DEPTH: usize = 256;
 
 fn limits() -> craft_mesh::Limits {
     craft_mesh::Limits {
@@ -20,7 +23,7 @@ fn limits() -> craft_mesh::Limits {
         max_parts: super::MAX_VERTICES,
         max_materials: super::MAX_VERTICES,
         max_nodes: 1_000_000,
-        max_depth: 64,
+        max_depth: MAX_DEPTH,
         max_data_bytes: super::MAX_MESH_FILE_BYTES as usize,
         max_extras: 100_000,
     }

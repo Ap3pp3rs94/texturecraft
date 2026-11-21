@@ -372,3 +372,45 @@ fn indexed_metadata_stops_at_the_entries_a_byte_can_index() {
     assert_eq!(raw.positions, [Vec3::X, Vec3::Y, Vec3::ZERO]);
     assert_eq!(raw.groups, vec![(DEFAULT_MATERIAL.into(), "tri".into(), vec![0, 1, 2])]);
 }
+
+fn nested_xform_chain(levels: usize) -> Vec<u8> {
+    let mut a = Abc { w: Writer::new() };
+    let pp = a.array("P", "", F32, 3, &f32s(&[0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0]));
+    let fi = a.array(".faceIndices", "", I32, 1, &i32s(&[0, 1, 2]));
+    let fc = a.array(".faceCounts", "", I32, 1, &i32s(&[3]));
+    let geom = a.compound(".geom", "schema=AbcGeom_PolyMesh_v1", vec![pp, fi, fc]);
+    let mut node = a.object(vec![geom], &[]);
+    let mut child_name = "CubeShape";
+    let mut child_schema = "schema=AbcGeom_PolyMesh_v1";
+    let long_name = "a".repeat(63);
+    for i in 0..levels {
+        let ops = a.scalar(".ops", U8, 1, &[0x10]);
+        let coords: Vec<_> = [1.0f64, 0.0, 0.0].into_iter().flat_map(f64::to_le_bytes).collect();
+        let vals = a.scalar(".vals", F64, 3, &coords);
+        let inherits = a.scalar(".inherits", U8, 1, &[1]);
+        let xf = a.compound(".xform", "schema=AbcGeom_Xform_v3", vec![ops, vals, inherits]);
+        node = a.object(vec![xf], &[(child_name, child_schema, node)]);
+        child_name = if i == 0 { "Cube" } else { &long_name };
+        child_schema = "schema=AbcGeom_Xform_v3";
+    }
+    let top = a.object(vec![], &[(&long_name, "schema=AbcGeom_Xform_v3", node)]);
+    a.archive(top, &["schema=AbcGeom_PolyMesh_v1"])
+}
+
+#[test]
+fn long_transform_chains_import() {
+    for levels in [64usize, 200] {
+        let bytes = nested_xform_chain(levels);
+        let mesh = crate::import_mesh_bytes("long-names.abc", &bytes).unwrap().mesh;
+        assert_eq!(mesh.indices.len(), 3, "{levels} levels should import one triangle");
+        let min_x = mesh.positions.iter().map(|p| p.x).fold(f32::INFINITY, f32::min);
+        assert!((min_x - levels as f32).abs() < 1e-4, "{levels} levels: expected min_x={levels}, got {min_x}");
+    }
+}
+
+#[test]
+fn nesting_past_the_limit_is_an_error() {
+    let bytes = nested_xform_chain(MAX_DEPTH + 1);
+    let err = read(&bytes).unwrap_err();
+    assert!(matches!(err, FormatError::TooLarge(_)), "expected TooLarge, got {err:?}");
+}
