@@ -95,19 +95,24 @@ fn a_mask_fill_has_no_channels_or_material() {
 fn a_mask_fill_is_projected_and_reset_like_any_fill() {
     let (mut s, _, effect) = mask_fill();
     execute(&mut s, "layer.fill.projection", &json!({"effect": effect.0, "projection": "planar", "scale": 2.0, "symmetry": true})).unwrap();
+
     assert!(matches!(projection(&s, effect), Projection::Planar { scale, .. } if scale == 2.0));
+
     let inspected = execute(&mut s, "project.inspect", &Value::Null).unwrap().to_string();
+
     assert!(inspected.contains("projectionSettings"), "inspect shows the mask fill's projection");
 
     execute(&mut s, "layer.fill.resetProjection", &json!({"effect": effect.0})).unwrap();
-    assert_eq!(projection(&s, effect), Projection::default());
+
+    assert!(matches!(projection(&s, effect), Projection::Planar { scale, .. } if scale == 1.0), "the reset keeps the projection, at its defaults");
     match &s.doc.project.effect(effect).unwrap().1.kind {
         EffectKind::Fill { sampling, .. } => assert!(sampling.symmetry.on, "the reset keeps the Symmetry section"),
         other => panic!("not a mask fill: {other:?}"),
     }
 
     execute(&mut s, "edit.undo", &Value::Null).unwrap();
-    assert!(matches!(projection(&s, effect), Projection::Planar { .. }), "the reset is one undo step");
+
+    assert!(matches!(projection(&s, effect), Projection::Planar { scale, .. } if scale == 2.0), "the reset is one undo step");
 }
 
 fn resolution(s: &Session, effect: LayerId) -> OutputResolution {

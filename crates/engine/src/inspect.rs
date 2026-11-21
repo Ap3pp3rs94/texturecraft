@@ -2,7 +2,7 @@
 //! without a screenshot.
 
 use serde_json::{Value, json};
-use texturecraft_core::{Effect, EffectKind, Fill, Filter, Generator, Layer, LayerKind, NormalFormat, Source};
+use texturecraft_core::{Effect, EffectKind, Fill, Filter, Generator, Layer, LayerKind, NormalFormat, Projection, Sampling, Source};
 
 use crate::Session;
 use crate::session::StackTarget;
@@ -40,26 +40,30 @@ fn with_ramp(mut v: Value, ramp: &[[f32; 3]]) -> Value {
     v
 }
 
-fn fill_json(f: &Fill) -> Value {
-    let mut v = json!({
-        "projection": f.projection.label(),
-        "projectionSettings": f.projection,
-        "filtering": f.sampling.filtering.id(),
-        "wrap": f.sampling.wrap.id(),
-        "scaleMode": f.sampling.scale.id(),
-        "symmetry": f.sampling.symmetry,
-        "sources": f.sources.iter().map(|(c, s)| (c.id().to_string(), source_json(s))).collect::<serde_json::Map<_, _>>(),
-    });
-    if let Some(frame) = f.projection.placed() {
-        v["decal"] = json!(frame);
+fn fill_json(fill: &Fill) -> Value {
+    let sources = fill.sources.iter().map(|(channel, source)| (channel.id().to_string(), source_json(source)));
+    let mut out = json!({ "sources": sources.collect::<serde_json::Map<_, _>>() });
+    placement_json(&fill.projection, &fill.sampling, &mut out);
+    if let Some(link) = &fill.link {
+        out["link"] = json!(link);
     }
-    if let Some(link) = &f.link {
-        v["link"] = json!(link);
+    if let Some(material) = &fill.material {
+        out["material"] = json!(material);
     }
-    if let Some(material) = &f.material {
-        v["material"] = json!(material);
+    out
+}
+
+/// Where a fill lands and how it reads its sources: the projection, its frame when placed on the surface, and the sampling
+fn placement_json(projection: &Projection, sampling: &Sampling, out: &mut Value) {
+    out["projection"] = json!(projection.label());
+    out["projectionSettings"] = json!(projection);
+    out["filtering"] = json!(sampling.filtering.id());
+    out["wrap"] = json!(sampling.wrap.id());
+    out["scaleMode"] = json!(sampling.scale.id());
+    out["symmetry"] = json!(sampling.symmetry);
+    if let Some(frame) = projection.placed() {
+        out["decal"] = json!(frame);
     }
-    v
 }
 
 /// A mask or content (`content`) effect.
@@ -85,12 +89,7 @@ fn effect_json(session: &Session, effect: &Effect, content: bool) -> Value {
         EffectKind::Paint => out["tiles"] = json!(mask_tiles()),
         EffectKind::Fill { source, projection, sampling } => {
             out["source"] = source_json(source);
-            out["projection"] = json!(projection.label());
-            out["projectionSettings"] = json!(projection);
-            out["filtering"] = json!(sampling.filtering.id());
-            out["wrap"] = json!(sampling.wrap.id());
-            out["scaleMode"] = json!(sampling.scale.id());
-            out["symmetry"] = json!(sampling.symmetry);
+            placement_json(projection, sampling, &mut out);
         }
         EffectKind::Material(fill) => out["fill"] = fill_json(fill),
         EffectKind::Filter(filter) => {
