@@ -370,8 +370,6 @@ mod tests {
 
     use super::*;
 
-    /// A repeating map far denser than the tiles drawn (Scaling 64 turned 45°) still fills the whole window, its far corner too
-
     /// A hand-edited span past a full turn spaces the ring's dots as the engine spaces the copies: six copies 60° apart, none on top of another
     #[test]
     fn the_ring_spaces_its_copies_as_the_engine_does() {

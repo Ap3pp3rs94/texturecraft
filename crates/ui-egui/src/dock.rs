@@ -1833,6 +1833,32 @@ pub(crate) fn properties(app: &mut TextureCraftApp, ui: &mut Ui) {
     crate::property_sheet::in_scope(ui, scope, |ui| properties_scrolled(app, ui, area, PastEnd::Always));
 }
 
+/// What the docked Properties list keeps its own scroll place for: the selected layer and the part of it edited, none for the tool
+fn properties_place(app: &TextureCraftApp) -> Option<(LayerId, StackTarget)> {
+    // A short panel in between would clamp a shared place back to the top; a greyed tool shows the layer's own sheet
+    if app.session.tool.tool == Tool::PolygonFill && app.session.tool_usable(Tool::PolygonFill) {
+        return None;
+    }
+
+    app.session.selected_layer().map(|layer| (layer, app.session.target))
+}
+
+/// The sections in `area`, leaving the solid bar's room even without it, so the bar coming in refits no row (flipped it every frame)
+pub(crate) fn properties_scrolled(app: &mut TextureCraftApp, ui: &mut Ui, area: egui::ScrollArea, past_end: PastEnd) {
+    let sheet_width = (ui.available_width() - ui.spacing().scroll.allocated_width()).max(0.0);
+    area.show(ui, |ui| {
+        ui.set_max_width(sheet_width);
+        crate::property_sheet::forget_sections(ui);
+        properties_contents(app, ui);
+
+        // Blank space under the rows lets the last section's top reach the top of the list, as the reference panel scrolls
+        let scrolls = ui.min_rect().height() > ui.clip_rect().height();
+        if past_end == PastEnd::Always || scrolls {
+            ui.add_space(crate::property_sheet::room_past_end(ui));
+        }
+    });
+}
+
 /// The tabs over the panel when it shows a fill layer's or a mask fill effect's sections, which they jump between
 pub(crate) fn properties_fill_tabs(app: &TextureCraftApp) -> Option<[(&'static str, &'static str); 3]> {
     if app.session.tool.tool == Tool::PolygonFill && app.session.tool_usable(Tool::PolygonFill) {
@@ -2842,6 +2868,18 @@ pub(crate) fn effect_anchors_below(app: &TextureCraftApp, layer: LayerId, effect
     project_effect_anchors_below(&app.session.doc.project, layer, effect)
 }
 
+/// [`effect_anchors_below`] in `project`
+pub(crate) fn project_effect_anchors_below(project: &texturecraft_engine::core::Project, layer: LayerId, effect: LayerId) -> Vec<(LayerId, String)> {
+    let owner = project.effect(effect).map_or(layer, |(owner, _)| owner);
+    let owner_anchors = anchors_below(project, owner);
+    if owner == layer {
+        return owner_anchors;
+    }
+
+    let displayed_anchors = anchors_below(project, layer);
+    owner_anchors.into_iter().filter(|(id, _)| displayed_anchors.iter().any(|(displayed, _)| id == displayed)).collect()
+}
+
 /// Whether anchor point `anchor` sits in a mask (it then records the mask's gray, whatever the channel).
 pub(crate) fn anchor_in_mask(app: &TextureCraftApp, anchor: LayerId) -> bool {
     let project = &app.session.doc.project;
@@ -3358,39 +3396,4 @@ mod layer_layout_tests {
         assert_eq!(size, 36.0);
         assert!(show_blend);
     }
-}
-
-pub(crate) fn project_effect_anchors_below(project: &texturecraft_engine::core::Project, layer: LayerId, effect: LayerId) -> Vec<(LayerId, String)> {
-    let owner = project.effect(effect).map_or(layer, |(owner, _)| owner);
-    let owner_anchors = anchors_below(project, owner);
-    if owner == layer {
-        return owner_anchors;
-    }
-
-    let displayed_anchors = anchors_below(project, layer);
-    owner_anchors.into_iter().filter(|(id, _)| displayed_anchors.iter().any(|(displayed, _)| id == displayed)).collect()
-}
-
-fn properties_place(app: &TextureCraftApp) -> Option<(LayerId, StackTarget)> {
-    // A short panel in between would clamp a shared place back to the top; a greyed tool shows the layer's own sheet
-    if app.session.tool.tool == Tool::PolygonFill && app.session.tool_usable(Tool::PolygonFill) {
-        return None;
-    }
-
-    app.session.selected_layer().map(|layer| (layer, app.session.target))
-}
-
-pub(crate) fn properties_scrolled(app: &mut TextureCraftApp, ui: &mut Ui, area: egui::ScrollArea, past_end: PastEnd) {
-    let sheet_width = (ui.available_width() - ui.spacing().scroll.allocated_width()).max(0.0);
-    area.show(ui, |ui| {
-        ui.set_max_width(sheet_width);
-        crate::property_sheet::forget_sections(ui);
-        properties_contents(app, ui);
-
-        // Blank space under the rows lets the last section's top reach the top of the list, as the reference panel scrolls
-        let scrolls = ui.min_rect().height() > ui.clip_rect().height();
-        if past_end == PastEnd::Always || scrolls {
-            ui.add_space(crate::property_sheet::room_past_end(ui));
-        }
-    });
 }
