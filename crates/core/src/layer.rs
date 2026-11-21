@@ -118,6 +118,10 @@ impl HeightMask {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "a fill holds its projection inline; boxing it would cost every fill read an indirection to save a few hundred bytes per paint layer or folder"
+)]
 pub enum LayerKind {
     /// Painted pixels, stored per channel by the engine under the layer id.
     Paint,
