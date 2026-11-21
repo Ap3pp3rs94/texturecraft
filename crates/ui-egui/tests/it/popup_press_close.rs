@@ -1,7 +1,6 @@
 //! A press outside a popup closes it when it turns into a drag (a paint stroke on the model), as a click does: the tool's colour, the layer menus and the symmetry settings, in the default layout and in a rearranged one restored after a restart
 
 use eframe::App as _;
-use egui::accesskit::Role;
 use egui::{Event, Modifiers, PointerButton, Pos2, Vec2, vec2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;

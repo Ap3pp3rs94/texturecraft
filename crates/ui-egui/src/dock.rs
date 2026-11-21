@@ -1881,22 +1881,6 @@ pub(crate) fn properties_contents(app: &mut TextureCraftApp, ui: &mut Ui) {
     match (&selected, app.session.target) {
         // Polygon fill shows its own settings and says what it fills into, wherever it can fill
         _ if tool == Tool::PolygonFill && tool_usable => legacy_body(ui, |ui| polygon_fill_properties(app, ui)),
-        (Some(layer), StackTarget::Effect(effect))
-            if app
-                .session
-                .doc
-                .project
-                .effect(effect)
-                .is_some_and(|(_, e)| matches!(&e.kind, EffectKind::Fill { projection, .. } if projection.placed().is_some())) =>
-        {
-            if let Some(decal) = app.session.doc.project.effect(effect).and_then(|(_, e)| match &e.kind {
-                EffectKind::Fill { projection, .. } => projection.placed().copied(),
-                _ => None,
-            }) {
-                legacy_body(ui, |ui| decal_editor(app, ui, &decal, &json!({"effect": effect.0}), layer.id));
-            }
-            effect_properties(app, ui, layer, effect);
-        }
         (Some(layer), StackTarget::Effect(effect)) if mask_fill_of(&app.session.doc.project, effect).is_some() => mask_fill_properties(app, ui, layer, effect),
         (Some(layer), StackTarget::Effect(effect)) => legacy_body(ui, |ui| effect_properties(app, ui, layer, effect)),
         (Some(layer), StackTarget::Content) if matches!(layer.kind, LayerKind::Fill(_)) => fill_properties(app, ui, layer),
@@ -3115,6 +3099,9 @@ fn effect_properties(app: &mut TextureCraftApp, ui: &mut Ui, layer: &Layer, effe
         EffectKind::Generator(generator) => crate::generator_panel::generator_properties(app, ui, layer.id, id, generator),
         EffectKind::Levels(levels) => crate::levels_properties::levels_properties(app, ui, layer, effect_id, levels),
         EffectKind::Fill { source, projection, .. } => legacy_body(ui, |ui| {
+            if let Some(decal) = projection.placed() {
+                decal_editor(app, ui, decal, &json!({"effect": id}), layer.id);
+            }
             ui.label(caption(tr("Fill")));
             let anchors = effect_anchors_below(app, layer.id, effect_id);
             let current = match source {

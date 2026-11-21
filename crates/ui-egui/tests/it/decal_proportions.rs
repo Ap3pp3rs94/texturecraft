@@ -43,7 +43,7 @@ fn decal(harness: &Harness<'_, TextureCraftApp>, layer: LayerId) -> Decal {
 /// Type `value` into the number field of the row labelled `label` and confirm it
 fn type_side(harness: &mut Harness<'_, TextureCraftApp>, label: &str, value: &str) {
     let field = |harness: &Harness<'_, TextureCraftApp>| {
-        let row = harness.get_by_label(label).rect().center().y;
+        let row = harness.get_by_role_and_label(Role::Label, label).rect().center().y;
         harness.get_all(by().role(Role::TextInput)).find(|node| (node.rect().center().y - row).abs() < 4.0).map(|node| node.rect().center()).unwrap()
     };
     harness.drag_at(field(harness));
