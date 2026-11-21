@@ -2,7 +2,7 @@
 //! without a screenshot.
 
 use serde_json::{Value, json};
-use texturecraft_core::{Effect, EffectKind, Fill, Filter, Generator, Layer, LayerKind, NormalFormat, Projection, Source};
+use texturecraft_core::{Effect, EffectKind, Fill, Filter, Generator, Layer, LayerKind, NormalFormat, Source};
 
 use crate::Session;
 use crate::session::StackTarget;
@@ -12,7 +12,8 @@ fn source_json(source: &Source) -> Value {
         Source::Uniform(value) => json!({ "uniform": value }),
         Source::Procedural { pattern, low, high, ramp } => {
             let mut report = json!({
-                "procedural": pattern.kind.label(), "scale": pattern.scale, "seed": pattern.seed, "contrast": pattern.contrast, "low": low, "high": high
+                "procedural": pattern.kind.label(), "scale": pattern.scale, "seed": pattern.seed, "contrast": pattern.contrast,
+                "balance": pattern.balance, "invert": pattern.invert, "low": low, "high": high
             });
 
             if !pattern.resolution.is_default() {
@@ -42,13 +43,21 @@ fn with_ramp(mut v: Value, ramp: &[[f32; 3]]) -> Value {
 fn fill_json(f: &Fill) -> Value {
     let mut v = json!({
         "projection": f.projection.label(),
+        "projectionSettings": f.projection,
+        "filtering": f.sampling.filtering.id(),
+        "wrap": f.sampling.wrap.id(),
+        "scaleMode": f.sampling.scale.id(),
+        "symmetry": f.sampling.symmetry,
         "sources": f.sources.iter().map(|(c, s)| (c.id().to_string(), source_json(s))).collect::<serde_json::Map<_, _>>(),
     });
-    if let Projection::Decal(d) = &f.projection {
-        v["decal"] = json!(d);
+    if let Some(frame) = f.projection.placed() {
+        v["decal"] = json!(frame);
     }
     if let Some(link) = &f.link {
         v["link"] = json!(link);
+    }
+    if let Some(material) = &f.material {
+        v["material"] = json!(material);
     }
     v
 }
@@ -74,7 +83,15 @@ fn effect_json(session: &Session, effect: &Effect, content: bool) -> Value {
         }
         EffectKind::Paint if content => out["tiles"] = json!(content_tiles()),
         EffectKind::Paint => out["tiles"] = json!(mask_tiles()),
-        EffectKind::Fill { source, .. } => out["source"] = source_json(source),
+        EffectKind::Fill { source, projection, sampling } => {
+            out["source"] = source_json(source);
+            out["projection"] = json!(projection.label());
+            out["projectionSettings"] = json!(projection);
+            out["filtering"] = json!(sampling.filtering.id());
+            out["wrap"] = json!(sampling.wrap.id());
+            out["scaleMode"] = json!(sampling.scale.id());
+            out["symmetry"] = json!(sampling.symmetry);
+        }
         EffectKind::Material(fill) => out["fill"] = fill_json(fill),
         EffectKind::Filter(filter) => {
             out["filter"] = json!(filter);
@@ -223,6 +240,7 @@ pub fn session(session: &Session) -> Value {
         "bakePreview": crate::bake_preview::preview_json(session),
         "camera": crate::view_cmds::camera_json(session),
         "display": session.doc.project.display,
+        "swatches": session.doc.project.swatches,
         "history": { "undo": session.undo_label(), "redo": session.redo_label(), "depth": session.history_labels().len() },
         "memoryBytes": session.memory().total(),
         "pendingTiles": session.pending_tiles(),

@@ -207,8 +207,8 @@ fn a_fill_on_a_higher_layer_reads_a_mask_anchor_added_in_the_interface() {
     h.get_by_role_and_label(Role::Tab, "Anchor points").click();
     h.run_steps(3);
 
-    let label = format!("Low / mask / {}", effect_name(&h, anchor));
-    h.get_by_role_and_label(Role::Button, &label).click();
+    let label = effect_name(&h, anchor);
+    h.get_by_role_and_label(Role::ListBoxOption, &label).click();
     h.run_steps(3);
 
     let Source::Anchor { anchor: read, .. } = reader_source(&h, high) else { panic!("the fill reads an anchor: {:?}", reader_source(&h, high)) };

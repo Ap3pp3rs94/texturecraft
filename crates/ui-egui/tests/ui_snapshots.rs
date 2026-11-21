@@ -25,6 +25,13 @@ fn select_map(harness: &mut Harness<'_, TextureCraftApp>, name: &str) {
 
 fn save(harness: &mut Harness<'_, TextureCraftApp>, dir: &Path, name: &str) {
     harness.run_steps(6);
+    // Material orbs render off the UI thread: wait for their full pictures
+    let start = std::time::Instant::now();
+    while !texturecraft_ui_egui::orb_previews::OrbPreviews::settled(&harness.ctx) && start.elapsed() < std::time::Duration::from_secs(20) {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        harness.run_steps(1);
+    }
+    harness.run_steps(2);
     let img = harness.render().unwrap_or_else(|e| panic!("{name}: {e}"));
     let path = dir.join(format!("{name}.png"));
     img.save(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
@@ -829,6 +836,35 @@ fn mask_fill_image_snapshot() {
     save(&mut harness, &output_dir, "mask-fill-image-selected");
 }
 
+/// Every docked panel's header bar (names in capitals, a close × at the right), then the Properties × hovered
+#[test]
+#[ignore]
+fn panel_header_snapshots() {
+    use serde_json::json;
+    use texturecraft_engine::execute;
+
+    let Some(output_dir) = std::env::var_os("TC_UI_SNAPSHOTS").map(PathBuf::from) else { return };
+    std::fs::create_dir_all(&output_dir).unwrap();
+    let mut session = texturecraft_engine::sample_session(256, 64).unwrap();
+    execute(&mut session, "layer.add.fill", &json!({"color": [0.8, 0.3, 0.1]})).unwrap();
+    let mut harness =
+        Harness::builder().with_size(egui::vec2(1600.0, 960.0)).with_pixels_per_point(2.0).wgpu().build_eframe(|cc| TextureCraftApp::new(cc, session));
+    harness.state_mut().ui.prefs.language = "en".into();
+    for (brightness, name) in [(Brightness::MediumDark, "medium"), (Brightness::Dark, "dark"), (Brightness::Light, "light")] {
+        harness.state_mut().ui.prefs.brightness = brightness;
+        save(&mut harness, &output_dir, &format!("panel-header-{name}"));
+    }
+    harness.state_mut().ui.prefs.brightness = Brightness::MediumDark;
+    let close = harness
+        .get_all_by_label("Close Panel")
+        .map(|node| node.rect())
+        .filter(|rect| rect.min.x > 1200.0)
+        .max_by(|a, b| a.min.y.total_cmp(&b.min.y))
+        .expect("the Properties header's close button");
+    harness.hover_at(close.center());
+    save(&mut harness, &output_dir, "panel-header-close-hovered");
+}
+
 #[test]
 #[ignore = "requires a GPU adapter and TC_UI_SNAPSHOTS"]
 fn tile_generator_gradient_map_snapshot() {
@@ -897,4 +933,761 @@ fn settings_pages_snapshot() {
     harness.state_mut().ui.prefs.ui_scale = 1.5;
     harness.state_mut().ui.windows.settings_draft.as_mut().unwrap().page = SettingsPage::General;
     save(&mut harness, &output_dir, "settings-compact");
+}
+
+#[test]
+#[ignore]
+fn default_layout_snapshots() {
+    use serde_json::json;
+    use texturecraft_engine::execute;
+
+    let Some(output_dir) = std::env::var_os("TC_UI_SNAPSHOTS").map(PathBuf::from) else { return };
+    std::fs::create_dir_all(&output_dir).unwrap();
+    let mut session = texturecraft_engine::sample_session(256, 64).unwrap();
+    for color in [[0.2, 0.4, 0.7], [0.5, 0.5, 0.5], [0.8, 0.3, 0.1]] {
+        execute(&mut session, "layer.add.fill", &json!({ "color": color })).unwrap();
+    }
+    let mut harness =
+        Harness::builder().with_size(egui::vec2(1600.0, 960.0)).with_pixels_per_point(2.0).wgpu().build_eframe(|cc| TextureCraftApp::new(cc, session));
+    harness.state_mut().ui.prefs.language = "en".into();
+    for (brightness, name) in [(Brightness::MediumDark, "medium"), (Brightness::Dark, "dark"), (Brightness::Light, "light")] {
+        harness.state_mut().ui.prefs.brightness = brightness;
+        save(&mut harness, &output_dir, &format!("default-layout-{name}"));
+    }
+    harness.state_mut().ui.prefs.brightness = Brightness::MediumDark;
+    let properties_close = harness
+        .get_all_by_label("Close Panel")
+        .map(|node| node.rect())
+        .filter(|rect| rect.min.x > 1200.0)
+        .max_by(|a, b| a.min.y.total_cmp(&b.min.y))
+        .expect("the Properties header's close button");
+    harness.hover_at(egui::pos2(properties_close.center().x - 120.0, properties_close.min.y - 6.0));
+    save(&mut harness, &output_dir, "default-layout-split-hovered");
+}
+
+#[test]
+#[ignore]
+fn fill_reset_snapshots() {
+    use serde_json::json;
+    use texturecraft_engine::execute;
+
+    let Some(output_dir) = std::env::var_os("TC_UI_SNAPSHOTS").map(PathBuf::from) else { return };
+    std::fs::create_dir_all(&output_dir).unwrap();
+    let mut session = texturecraft_engine::sample_session(256, 64).unwrap();
+    let layer = execute(&mut session, "layer.add.fill", &json!({"color": [0.8, 0.3, 0.1]})).unwrap()["layer"].clone();
+    execute(&mut session, "layer.fill.projection", &json!({"layer": layer, "tiling": [2.0, 2.0], "filtering": "nearest"})).unwrap();
+    let mut harness =
+        Harness::builder().with_size(egui::vec2(1600.0, 960.0)).with_pixels_per_point(2.0).wgpu().build_eframe(|cc| TextureCraftApp::new(cc, session));
+    harness.state_mut().ui.prefs.language = "en".into();
+    for (brightness, name) in [(Brightness::MediumDark, "medium"), (Brightness::Dark, "dark"), (Brightness::Light, "light")] {
+        harness.state_mut().ui.prefs.brightness = brightness;
+        save(&mut harness, &output_dir, &format!("fill-reset-{name}"));
+    }
+    harness.state_mut().ui.prefs.brightness = Brightness::MediumDark;
+    let reset = harness.get_by_label("Fill: Reset to defaults").rect().center();
+    harness.hover_at(reset);
+    save(&mut harness, &output_dir, "fill-reset-hovered");
+    // The band sits under the fold at this height: scroll Properties down to it
+    harness.hover_at(reset);
+    harness.event(egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(0.0, -110.0),
+        modifiers: egui::Modifiers::NONE,
+        phase: egui::TouchPhase::Move,
+        source: egui::MouseWheelSource::Unknown,
+    });
+    harness.run_steps(3);
+    let edges = harness.get_by_label("Restore defaults").rect().center();
+    harness.hover_at(edges);
+    save(&mut harness, &output_dir, "fill-reset-band-hovered");
+    harness.event(egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(0.0, 110.0),
+        modifiers: egui::Modifiers::NONE,
+        phase: egui::TouchPhase::Move,
+        source: egui::MouseWheelSource::Unknown,
+    });
+    harness.run_steps(3);
+    harness.get_by_label("Fill: Reset to defaults").click();
+    harness.hover_at(reset);
+    save(&mut harness, &output_dir, "fill-reset-at-defaults");
+}
+
+#[test]
+#[ignore]
+fn fill_properties_snapshots() {
+    use serde_json::json;
+    use texturecraft_engine::execute;
+
+    let Some(output_dir) = std::env::var_os("TC_UI_SNAPSHOTS").map(PathBuf::from) else { return };
+    std::fs::create_dir_all(&output_dir).unwrap();
+    let mut session = texturecraft_engine::sample_session(256, 64).unwrap();
+    let layer = execute(&mut session, "layer.add.fill", &json!({"color": [0.8, 0.3, 0.1]})).unwrap()["layer"].clone();
+    execute(
+        &mut session,
+        "layer.fill.projection",
+        &json!({"layer": layer, "tiling": [2.0, 2.0], "rotation": 30.0, "offset": [0.25, 0.0], "wrap": "repeat", "filtering": "bilinearHq"}),
+    )
+    .unwrap();
+    let mut harness =
+        Harness::builder().with_size(egui::vec2(1600.0, 1500.0)).with_pixels_per_point(2.0).wgpu().build_eframe(|cc| TextureCraftApp::new(cc, session));
+    for (brightness, name) in [(Brightness::MediumDark, "medium"), (Brightness::Dark, "dark"), (Brightness::Light, "light")] {
+        harness.state_mut().ui.prefs.brightness = brightness;
+        save(&mut harness, &output_dir, &format!("fill-uv-{name}"));
+    }
+    harness.state_mut().ui.prefs.brightness = Brightness::MediumDark;
+    for (shown, hover, name) in [
+        ("UV projection", "Planar projection", "fill-uv-projection-open"),
+        ("Bilinear | HQ", "Nearest", "fill-uv-filtering-open"),
+        ("Repeat", "Repeat horizontally", "fill-uv-wrap-open"),
+    ] {
+        harness.get_by_label(shown).click();
+        harness.run_steps(2);
+        harness.get_by_label(hover).hover();
+        save(&mut harness, &output_dir, name);
+        harness.key_press(egui::Key::Escape);
+        harness.run_steps(2);
+    }
+    harness.get_by_label("Physical size").click();
+    save(&mut harness, &output_dir, "fill-uv-physical");
+    harness.get_by_label("Link").click();
+    save(&mut harness, &output_dir, "fill-uv-physical-unlinked");
+    // Screen 02: every other projection, with the lists that open from its new rows
+    let cases = [
+        ("spherical", json!({}), "fill-spherical"),
+        ("cylindrical", json!({"scaleMode": "physicalSize"}), "fill-cylindrical"),
+        ("cylindrical", json!({"angle": 120.0, "backfaceCulling": true}), "fill-cylindrical-angle"),
+        ("triplanar", json!({"scaleMode": "physicalSize"}), "fill-triplanar"),
+        ("planar", json!({"scaleMode": "physicalSize", "backfaceCulling": true, "shapeCrop": "cropped"}), "fill-planar"),
+        ("warp", json!({"scaleMode": "physicalSize", "warpCorners": [[-0.55, 0.48], [0.56, 0.6], [0.48, -0.55], [-0.45, -0.45]]}), "fill-warp"),
+        ("uvTile", json!({}), "fill-uvtile"),
+    ];
+    for (kind, settings, name) in cases {
+        let session = &mut harness.state_mut().session;
+        execute(session, "layer.fill.projection", &json!({"layer": layer, "projection": kind})).unwrap();
+        let mut settings = settings;
+        settings["layer"] = layer.clone();
+        execute(session, "layer.fill.projection", &settings).unwrap();
+        save(&mut harness, &output_dir, name);
+    }
+    harness.get_by_label("Fill (Match per UV Tile)").click();
+    harness.run_steps(2);
+    harness.get_by_label("Warp projection").hover();
+    save(&mut harness, &output_dir, "fill-uvtile-projection-open");
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(2);
+    let session = &mut harness.state_mut().session;
+    // Tri-planar's Shape crop sits highest in the panel: its list opens in view
+    execute(session, "layer.fill.projection", &json!({"layer": layer, "projection": "triplanar"})).unwrap();
+    harness.run_steps(2);
+    harness.get_by_label("Projection Extends Outside Shape").click();
+    harness.run_steps(2);
+    harness.get_by_label("Projection Cropped to Shape").hover();
+    save(&mut harness, &output_dir, "fill-triplanar-crop-open");
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(2);
+    // The shape previews take their colours from the theme
+    for (brightness, name) in [(Brightness::Dark, "dark"), (Brightness::Light, "light")] {
+        harness.state_mut().ui.prefs.brightness = brightness;
+        save(&mut harness, &output_dir, &format!("fill-triplanar-{name}"));
+    }
+}
+
+/// Screen 03: a planar fill's Symmetry section off, mirrored (a moved Y plane with U flipped), radial (6 over a full turn, 4 over half a turn, also in the dark and light themes), its Type list open, and a UV fill's greyed switch
+#[test]
+#[ignore]
+fn fill_symmetry_snapshots() {
+    use serde_json::json;
+    use texturecraft_engine::execute;
+
+    let Some(output_dir) = std::env::var_os("TC_UI_SNAPSHOTS").map(PathBuf::from) else { return };
+    std::fs::create_dir_all(&output_dir).unwrap();
+    let mut session = texturecraft_engine::sample_session(256, 64).unwrap();
+    let layer = execute(&mut session, "layer.add.fill", &json!({"color": [0.8, 0.3, 0.1]})).unwrap()["layer"].clone();
+    execute(&mut session, "layer.fill.projection", &json!({"layer": layer, "projection": "planar"})).unwrap();
+    let mut harness =
+        Harness::builder().with_size(egui::vec2(1600.0, 1500.0)).with_pixels_per_point(2.0).wgpu().build_eframe(|cc| TextureCraftApp::new(cc, session));
+    harness.run_steps(4);
+    harness.get_by_role_and_label(egui::Role::Tab, "Symmetry").click();
+    let cases = [
+        (json!({}), "symmetry-off"),
+        (json!({"symmetry": true}), "symmetry-mirror"),
+        (json!({"symmetryAxis": 1, "axisPosition": [0.0, 0.4, 0.0], "flipCopy": [true, false]}), "symmetry-mirror-y"),
+        (json!({"symmetryType": "radial", "symmetryAxis": 2, "axisPosition": 0, "flipCopy": [false, false]}), "symmetry-radial"),
+        (json!({"symmetryCount": 4, "angleSpan": 180}), "symmetry-radial-half"),
+    ];
+    for (settings, name) in cases {
+        let mut settings = settings;
+        settings["layer"] = layer.clone();
+        execute(&mut harness.state_mut().session, "layer.fill.projection", &settings).unwrap();
+        save(&mut harness, &output_dir, name);
+    }
+    for (brightness, name) in [(Brightness::Dark, "dark"), (Brightness::Light, "light")] {
+        harness.state_mut().ui.prefs.brightness = brightness;
+        save(&mut harness, &output_dir, &format!("symmetry-radial-half-{name}"));
+    }
+    harness.state_mut().ui.prefs.brightness = Brightness::MediumDark;
+    harness.get_by_role_and_label(egui::Role::ComboBox, "Radial symmetry").click();
+    harness.run_steps(2);
+    harness.get_by_label("Mirror symmetry").hover();
+    save(&mut harness, &output_dir, "symmetry-type-open");
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(2);
+    harness.get_by_role_and_label(egui::Role::RadioButton, "X").hover();
+    save(&mut harness, &output_dir, "symmetry-axis-hover");
+
+    execute(&mut harness.state_mut().session, "layer.fill.projection", &json!({"layer": layer, "projection": "uv"})).unwrap();
+    harness.run_steps(4);
+    harness.get_by_role_and_label(egui::Role::Tab, "Symmetry").click();
+    harness.run_steps(4);
+    harness.get_by_role_and_label(egui::Role::CheckBox, "Symmetry").hover();
+    save(&mut harness, &output_dir, "symmetry-uv");
+}
+
+/// A material link as MaterialCraft leaves it on a fill: three float inputs, a preset and five outputs (the maps stay the fill's own sources)
+fn steel_painted_worn() -> texturecraft_engine::core::MaterialLink {
+    use serde_json::json;
+    use texturecraft_engine::core::{LinkParam, LinkPreset, MaterialLink};
+    let float = |id: &str, label: &str, value: f32| LinkParam {
+        id: id.into(),
+        label: label.into(),
+        group: String::new(),
+        value: json!({"t": "float", "v": value}),
+        default: json!({"t": "float", "v": 0.5}),
+        min: 0.0,
+        max: 1.0,
+        options: Vec::new(),
+    };
+    MaterialLink {
+        name: "Steel Painted Worn".into(),
+        package: String::new(),
+        graph: "main".into(),
+        params: vec![float("wear", "Wear", 0.55), float("hue", "Paint hue", 0.3), float("dirt", "Dirt", 0.2)],
+        presets: vec![LinkPreset { name: "Fresh paint".into(), values: Default::default() }],
+        inputs: Vec::new(),
+        size: 1024,
+        resolution: None,
+        mapping: Default::default(),
+        outputs: ["baseColor", "metallic", "roughness", "normal", "height"].map(|output| (output.to_owned(), format!("steel_{output}.png"))).into(),
+    }
+}
+
+/// Screen 04: the colour picker window open on a uniform base colour with five swatches, its close, a slider, a swatch and + hovered, a swatch's menu, with its lists open (a hovered option previews nothing), in RGB and resized from its top left corner; `TC_UI_THEMES` set adds the dark and light themes
+#[test]
+#[ignore]
+fn fill_color_picker_snapshots() {
+    use serde_json::json;
+    use texturecraft_engine::execute;
+
+    let Some(output_dir) = std::env::var_os("TC_UI_SNAPSHOTS").map(PathBuf::from) else { return };
+    std::fs::create_dir_all(&output_dir).unwrap();
+    let mut session = texturecraft_engine::sample_session(256, 64).unwrap();
+    let orange = [0xE5, 0x8A, 0x4E].map(|c| texturecraft_engine::texel::srgb_to_linear(f32::from(c as u8) / 255.0));
+    let layer = execute(&mut session, "layer.add.fill", &json!({"color": orange})).unwrap()["layer"].as_u64().unwrap();
+    execute(&mut session, "layer.fill.set", &json!({"layer": layer, "channel": "height", "enabled": true})).unwrap();
+    for swatch in ["#E58A4E", "#BEBEBE", "#3C4046", "#7A7AF5", "#B0623A"] {
+        execute(&mut session, "swatch.add", &json!({"color": swatch})).unwrap();
+    }
+    let mut harness =
+        Harness::builder().with_size(egui::vec2(1600.0, 2000.0)).with_pixels_per_point(2.0).wgpu().build_eframe(|cc| TextureCraftApp::new(cc, session));
+    harness.state_mut().ui.prefs.language = "en".into();
+    harness.run_steps(4);
+    harness.get_by_role_and_label(egui::Role::Tab, "Material").click();
+    // The tab scrolls the panel to its section (the scroll animates for about twenty frames)
+    harness.run_steps(25);
+    harness.get_by_role_and_label(egui::Role::Button, "Base color").click();
+    harness.run_steps(2);
+    save(&mut harness, &output_dir, "picker-open");
+    let title = harness.get_by_role_and_label(egui::Role::TitleBar, "Base color").rect();
+    harness.hover_at(egui::pos2(title.right() + 6.0, title.center().y));
+    save(&mut harness, &output_dir, "picker-close-hover");
+    harness.get_by_role_and_label(egui::Role::Slider, "S").hover();
+    save(&mut harness, &output_dir, "picker-hover");
+    harness.get_by_role_and_label(egui::Role::Button, "#7A7AF5").hover();
+    save(&mut harness, &output_dir, "picker-swatch-hover");
+    harness.get_by_role_and_label(egui::Role::Button, "Add swatch").hover();
+    harness.run_steps(30);
+    save(&mut harness, &output_dir, "picker-add-hover");
+    let chip = harness.get_by_role_and_label(egui::Role::Button, "#7A7AF5").rect().center();
+    harness.hover_at(chip);
+    harness.run_steps(1);
+    for pressed in [true, false] {
+        harness.event(egui::Event::PointerButton { pos: chip, button: egui::PointerButton::Secondary, pressed, modifiers: egui::Modifiers::NONE });
+        harness.run_steps(1);
+    }
+    harness.run_steps(2);
+    harness.get_by_role_and_label(egui::Role::Button, "Remove swatch").hover();
+    save(&mut harness, &output_dir, "picker-swatch-menu");
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(2);
+    harness.get_by_role_and_label(egui::Role::ComboBox, "sRGB").click();
+    harness.run_steps(2);
+    harness.get_by_role_and_label(egui::Role::ListBoxOption, "Linear").hover();
+    save(&mut harness, &output_dir, "picker-space-list");
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(2);
+    harness.get_by_role_and_label(egui::Role::ComboBox, "HSV").click();
+    harness.run_steps(2);
+    harness.get_by_role_and_label(egui::Role::ListBoxOption, "RGB").hover();
+    save(&mut harness, &output_dir, "picker-model-list");
+    harness.get_by_role_and_label(egui::Role::ListBoxOption, "RGB").click();
+    harness.run_steps(2);
+    save(&mut harness, &output_dir, "picker-rgb");
+    // The window stands at the screen's bottom here, so it grows from its top left corner
+    let corner = harness.get_by_role_and_label(egui::Role::TitleBar, "Base color").rect().left_top() + egui::vec2(2.0, 2.0);
+    let by = egui::vec2(-120.0, -90.0);
+    harness.hover_at(corner);
+    harness.run_steps(1);
+    harness.event(egui::Event::PointerButton { pos: corner, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+    harness.run_steps(1);
+    for step in 1..=4 {
+        harness.hover_at(corner + by * (step as f32 / 4.0));
+        harness.run_steps(1);
+    }
+    harness.event(egui::Event::PointerButton { pos: corner + by, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+    harness.run_steps(2);
+    save(&mut harness, &output_dir, "picker-resized");
+    if std::env::var_os("TC_UI_THEMES").is_some() {
+        for (brightness, name) in [(Brightness::Dark, "dark"), (Brightness::Light, "light")] {
+            harness.state_mut().ui.prefs.brightness = brightness;
+            save(&mut harness, &output_dir, &format!("picker-resized-{name}"));
+        }
+    }
+}
+
+/// Screen 04: a fill's Material section in Channels (a procedural base colour with its Attributes open, a uniform metallic, a normal image, a signed height), its source list open with a hover, the picker on the base colour, the Material side of a plain fill (no material, its material list open with a hover, Copper picked; Copper also in the dark and light themes) and of a linked material; the linked one also in the dark and light themes
+#[test]
+#[ignore]
+fn fill_material_snapshots() {
+    use serde_json::json;
+    use texturecraft_engine::core::{LayerId, LayerKind};
+    use texturecraft_engine::execute;
+
+    let Some(output_dir) = std::env::var_os("TC_UI_SNAPSHOTS").map(PathBuf::from) else { return };
+    std::fs::create_dir_all(&output_dir).unwrap();
+    let mut session = texturecraft_engine::sample_session(256, 64).unwrap();
+    let mut png = Vec::new();
+    image::RgbaImage::from_fn(16, 16, |x, y| image::Rgba([110 + (x * 8) as u8, 110 + (y * 8) as u8, 250, 255]))
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+    let normal = session.import_resource_bytes("bricks_normal.png", png).unwrap();
+    let layer = execute(&mut session, "layer.add.fill", &json!({"color": [0.55, 0.2, 0.08]})).unwrap()["layer"].as_u64().unwrap();
+    for settings in [
+        json!({"channel": "basecolor", "procedural": "Clouds", "low": [0.3, 0.08, 0.02], "high": [0.7, 0.3, 0.12]}),
+        json!({"channel": "normal", "enabled": true}),
+        json!({"channel": "normal", "image": normal}),
+        json!({"channel": "height", "enabled": true}),
+    ] {
+        let mut settings = settings;
+        settings["layer"] = json!(layer);
+        execute(&mut session, "layer.fill.set", &settings).unwrap();
+    }
+    let mut harness =
+        Harness::builder().with_size(egui::vec2(1600.0, 1500.0)).with_pixels_per_point(2.0).wgpu().build_eframe(|cc| TextureCraftApp::new(cc, session));
+    harness.state_mut().ui.prefs.language = "en".into();
+    harness.run_steps(4);
+    harness.get_by_role_and_label(egui::Role::Tab, "Material").click();
+    save(&mut harness, &output_dir, "material-channels");
+    // The Base color slot (the lowest "Base color" list: the Layers panel has one too) with its list open
+    harness.get_all_by_role_and_label(egui::Role::ComboBox, "Base color").max_by(|a, b| a.rect().top().total_cmp(&b.rect().top())).unwrap().click();
+    harness.run_steps(2);
+    harness.get_by_role_and_label(egui::Role::ListBoxOption, "Perlin noise").hover();
+    save(&mut harness, &output_dir, "material-source-list");
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(2);
+    harness.get_all_by_role_and_label(egui::Role::Button, "Attributes").next().unwrap().click();
+    save(&mut harness, &output_dir, "material-attributes");
+    harness.get_all_by_role_and_label(egui::Role::Button, "Attributes").next().unwrap().click();
+    harness.run_steps(2);
+    harness.get_all_by_role_and_label(egui::Role::Button, "Invert").next().unwrap().hover();
+    save(&mut harness, &output_dir, "material-invert-hover");
+    // The same plain fill on the Material side: one whole material, picked from the card's list
+    harness.get_by_role_and_label(egui::Role::RadioButton, "Material").click();
+    harness.run_steps(2);
+    save(&mut harness, &output_dir, "material-whole-none");
+    harness.get_by_role_and_label(egui::Role::ComboBox, "None").click();
+    harness.run_steps(2);
+    harness.get_by_role_and_label(egui::Role::ListBoxOption, "Copper").hover();
+    save(&mut harness, &output_dir, "material-whole-list");
+    harness.get_by_role_and_label(egui::Role::ListBoxOption, "Copper").click();
+    harness.run_steps(2);
+    harness.get_by_role_and_label(egui::Role::RadioButton, "Channels").hover();
+    save(&mut harness, &output_dir, "material-whole-copper");
+    for (brightness, name) in [(Brightness::Dark, "dark"), (Brightness::Light, "light")] {
+        harness.state_mut().ui.prefs.brightness = brightness;
+        save(&mut harness, &output_dir, &format!("material-whole-copper-{name}"));
+    }
+    harness.state_mut().ui.prefs.brightness = Brightness::MediumDark;
+    harness.get_by_role_and_label(egui::Role::RadioButton, "Channels").click();
+    harness.run_steps(2);
+    save(&mut harness, &output_dir, "material-whole-copper-channels");
+    harness.get_by_role_and_label(egui::Role::RadioButton, "Material").click();
+    harness.run_steps(2);
+    // Back to the fill the linked shots below expect (the pick was one undo step)
+    execute(&mut harness.state_mut().session, "edit.undo", &json!({})).unwrap();
+
+    let session = &mut harness.state_mut().session;
+    if let Some(LayerKind::Fill(fill)) = session.doc.project.layers.get_mut(&LayerId(layer)).map(|layer| &mut layer.kind) {
+        fill.link = Some(Box::new(steel_painted_worn()));
+    }
+    harness.run_steps(4);
+    harness.get_by_role_and_label(egui::Role::Tab, "Material").click();
+    save(&mut harness, &output_dir, "material-linked");
+    // The bands sit below the panel's fold: scroll each control into view (the scroll animates for about twenty frames)
+    let reach = |harness: &mut Harness<'_, TextureCraftApp>, role: egui::Role, label: &str| {
+        harness.get_by_role_and_label(role, label).scroll_to_me();
+        harness.run_steps(25);
+    };
+    // The band is folded by the time it is reached in this run: unfold it first
+    if harness.query_by_role_and_label(egui::Role::ComboBox, "normal").is_none() {
+        reach(&mut harness, egui::Role::Button, "Channels mapping");
+        harness.get_by_role_and_label(egui::Role::Button, "Channels mapping").click();
+        harness.run_steps(2);
+    }
+    reach(&mut harness, egui::Role::ComboBox, "normal");
+    harness.get_by_role_and_label(egui::Role::ComboBox, "roughness").click();
+    harness.run_steps(2);
+    harness.get_by_role_and_label(egui::Role::ListBoxOption, "normal").hover();
+    save(&mut harness, &output_dir, "material-mapping-list");
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(2);
+    reach(&mut harness, egui::Role::Button, "Resolution");
+    save(&mut harness, &output_dir, "material-resolution-folded");
+    harness.get_by_role_and_label(egui::Role::Button, "Resolution").click();
+    harness.run_steps(2);
+    reach(&mut harness, egui::Role::ComboBox, "Texture set  ·  256");
+    save(&mut harness, &output_dir, "material-resolution");
+    harness.get_by_role_and_label(egui::Role::ComboBox, "Texture set  ·  256").click();
+    harness.run_steps(2);
+    harness.get_by_role_and_label(egui::Role::ListBoxOption, "×2  ·  512").hover();
+    save(&mut harness, &output_dir, "material-resolution-relative-list");
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(2);
+    harness.get_by_role_and_label(egui::Role::RadioButton, "Fixed").click();
+    harness.run_steps(2);
+    // This link has no package, so the re-cook fails with a toast over the panel
+    harness.state_mut().toasts.clear();
+    harness.get_by_role_and_label(egui::Role::ComboBox, "256 × 256").click();
+    harness.run_steps(2);
+    harness.get_by_role_and_label(egui::Role::ListBoxOption, "1024 × 1024").hover();
+    save(&mut harness, &output_dir, "material-resolution-fixed-list");
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(2);
+    harness.get_by_role_and_label(egui::Role::Button, "Resolution").click();
+    harness.run_steps(2);
+    save(&mut harness, &output_dir, "material-resolution-fixed-folded");
+    for (brightness, name) in [(Brightness::Dark, "dark"), (Brightness::Light, "light")] {
+        harness.state_mut().ui.prefs.brightness = brightness;
+        save(&mut harness, &output_dir, &format!("material-linked-{name}"));
+    }
+    harness.state_mut().ui.prefs.brightness = Brightness::MediumDark;
+    harness.get_by_role_and_label(egui::Role::RadioButton, "Channels").click();
+    save(&mut harness, &output_dir, "material-linked-channels");
+}
+
+/// The armed eyedropper is the pointer over the panels too, its tip on the hovered pixel
+#[test]
+#[ignore]
+fn eyedropper_pointer_snapshots() {
+    use serde_json::json;
+    use texturecraft_engine::execute;
+
+    let Some(output_dir) = std::env::var_os("TC_UI_SNAPSHOTS").map(PathBuf::from) else { return };
+    std::fs::create_dir_all(&output_dir).unwrap();
+    let mut session = texturecraft_engine::sample_session(256, 64).unwrap();
+    execute(&mut session, "layer.add.fill", &json!({"color": [0.8, 0.3, 0.1]})).unwrap();
+    let mut harness =
+        Harness::builder().with_size(egui::vec2(1600.0, 960.0)).with_pixels_per_point(1.0).wgpu().build_eframe(|cc| TextureCraftApp::new(cc, session));
+    harness.state_mut().ui.prefs.language = "en".into();
+    // Only the app's own pointer shows, not the test's stand-in arrow
+    harness.set_render_cursor(false);
+    harness.run_steps(4);
+    harness.get_by_role_and_label(egui::Role::Tab, "Material").click();
+    harness.run_steps(3);
+    harness.get_by_role_and_label(egui::Role::Button, "Base color").click();
+    harness.run_steps(3);
+    harness.get_all_by_role_and_label(egui::Role::Button, "Pick color").next().unwrap().click();
+    harness.run_steps(3);
+    let over_panel = harness.get_by_role_and_label(egui::Role::Tab, "Material").rect().center();
+    harness.hover_at(over_panel);
+    save(&mut harness, &output_dir, "eyedropper-over-properties");
+    harness.hover_at(egui::pos2(700.0, 450.0));
+    save(&mut harness, &output_dir, "eyedropper-over-viewport");
+}
+
+/// Gives the shelf thumbnails rendered off the UI thread time to arrive
+fn settle_thumbnails(h: &mut Harness<'_, TextureCraftApp>) {
+    for _ in 0..100 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        h.run_steps(1);
+    }
+}
+
+/// The channel source picker opened from each kind of source, searching, on Anchor points, and the filter picker in the same style
+#[test]
+#[ignore]
+fn source_picker_snapshots() {
+    use serde_json::json;
+    use texturecraft_engine::execute;
+
+    let Some(output_dir) = std::env::var_os("TC_UI_SNAPSHOTS").map(PathBuf::from) else { return };
+    std::fs::create_dir_all(&output_dir).unwrap();
+    let mut session = texturecraft_engine::sample_session(256, 64).unwrap();
+    let mut png = Vec::new();
+    let rust = image::RgbaImage::from_fn(64, 64, |x, y| image::Rgba([150 + ((x * 7 + y * 3) % 60) as u8, 70 + ((x * y) % 40) as u8, 30, 255]));
+    rust.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+    let rust = session.import_resource_bytes("rust_albedo.png", png).unwrap();
+    let below = execute(&mut session, "layer.add.fill", &json!({})).unwrap()["layer"].clone();
+    execute(&mut session, "effect.add.anchor", &json!({"layer": below, "name": "Edge wear"})).unwrap();
+    let layer = execute(&mut session, "layer.add.fill", &json!({"color": [0.45, 0.13, 0.05]})).unwrap()["layer"].clone();
+    let mut harness =
+        Harness::builder().with_size(egui::vec2(1600.0, 1200.0)).with_pixels_per_point(2.0).wgpu().build_eframe(|cc| TextureCraftApp::new(cc, session));
+    harness.state_mut().ui.prefs.language = "en".into();
+    harness.run_steps(4);
+    harness.get_by_role_and_label(egui::Role::Tab, "Material").click();
+    harness.run_steps(3);
+
+    let shot = |harness: &mut Harness<'_, TextureCraftApp>, mut source: serde_json::Value, hover: Option<&str>, search: Option<&str>, name: &str| {
+        source["layer"] = layer.clone();
+        source["channel"] = json!("baseColor");
+        execute(&mut harness.state_mut().session, "layer.fill.set", &source).unwrap();
+        harness.run_steps(3);
+        harness.get_by_role_and_label(egui::Role::ComboBox, "Base color").click();
+        harness.run_steps(30);
+        if let Some(text) = search {
+            harness.event(egui::Event::Text(text.into()));
+            harness.run_steps(3);
+        }
+        settle_thumbnails(harness);
+        if let Some(label) = hover {
+            let at = harness.get_by_role_and_label(egui::Role::ListBoxOption, label).rect().center();
+            harness.hover_at(at);
+        }
+        save(harness, &output_dir, name);
+        harness.key_press(egui::Key::Escape);
+        harness.run_steps(3);
+    };
+    shot(&mut harness, json!({"color": [0.45, 0.13, 0.05]}), Some("Grunge"), None, "source-picker-top");
+    shot(&mut harness, json!({"image": rust}), Some("Import..."), None, "source-picker-textures");
+    shot(&mut harness, json!({"alpha": "scratches"}), Some("Cracks"), None, "source-picker-alphas");
+    shot(&mut harness, json!({"alpha": "letter_y"}), None, None, "source-picker-end");
+    shot(&mut harness, json!({"color": [0.45, 0.13, 0.05]}), None, Some("scr"), "source-picker-search");
+
+    // Anchor points on the Roughness slot, scrolled into view first
+    harness.get_by_role_and_label(egui::Role::ComboBox, "Roughness").scroll_to_me();
+    harness.run_steps(25);
+    harness.get_by_role_and_label(egui::Role::ComboBox, "Roughness").click();
+    harness.run_steps(3);
+    harness.get_by_role_and_label(egui::Role::Tab, "Anchor points").click();
+    harness.run_steps(3);
+    let anchor = harness.get_all_by_role(egui::Role::ListBoxOption).next().unwrap().rect().center();
+    harness.hover_at(anchor);
+    save(&mut harness, &output_dir, "source-picker-anchors");
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(3);
+
+    // The picked procedural's card, then the three themes with the picker open from Uniform
+    execute(&mut harness.state_mut().session, "layer.fill.set", &json!({"layer": layer, "channel": "baseColor", "procedural": "Clouds", "scale": 4.0}))
+        .unwrap();
+    save(&mut harness, &output_dir, "source-picker-picked");
+    execute(&mut harness.state_mut().session, "layer.fill.set", &json!({"layer": layer, "channel": "baseColor", "color": [0.45, 0.13, 0.05]})).unwrap();
+    harness.run_steps(3);
+    harness.get_by_role_and_label(egui::Role::ComboBox, "Base color").click();
+    settle_thumbnails(&mut harness);
+    for (brightness, name) in [(Brightness::MediumDark, "medium"), (Brightness::Dark, "dark"), (Brightness::Light, "light")] {
+        harness.state_mut().ui.prefs.brightness = brightness;
+        save(&mut harness, &output_dir, &format!("source-picker-{name}"));
+    }
+    harness.state_mut().ui.prefs.brightness = Brightness::MediumDark;
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(3);
+
+    // The filter picker in the same style
+    let filter = execute(&mut harness.state_mut().session, "effect.add.filter", &json!({"target": "content", "filter": "invert"})).unwrap();
+    let filter = texturecraft_engine::core::LayerId(filter["effect"].as_u64().unwrap());
+    harness.state_mut().session.target = texturecraft_engine::StackTarget::Effect(filter);
+    harness.run_steps(3);
+    harness.get_by_role_and_label(egui::Role::ComboBox, "Invert").click();
+    settle_thumbnails(&mut harness);
+    let blur = harness.get_by_role_and_label(egui::Role::ListBoxOption, "Blur").rect().center();
+    harness.hover_at(blur);
+    save(&mut harness, &output_dir, "filter-picker-v4");
+}
+
+/// The culling rows' i on a planar fill: each one hovered with its tooltip, in the medium theme, then the Depth culling one in the dark and light themes
+#[test]
+#[ignore]
+fn info_icon_snapshots() {
+    use serde_json::json;
+    use texturecraft_engine::execute;
+
+    let Some(output_dir) = std::env::var_os("TC_UI_SNAPSHOTS").map(PathBuf::from) else { return };
+    std::fs::create_dir_all(&output_dir).unwrap();
+    let mut session = texturecraft_engine::sample_session(256, 64).unwrap();
+    let layer = execute(&mut session, "layer.add.fill", &json!({"color": [0.8, 0.3, 0.1]})).unwrap()["layer"].clone();
+    execute(&mut session, "layer.fill.projection", &json!({"layer": layer, "projection": "planar"})).unwrap();
+    execute(&mut session, "layer.fill.projection", &json!({"layer": layer, "scaleMode": "physicalSize", "backfaceCulling": true})).unwrap();
+    let mut harness =
+        Harness::builder().with_size(egui::vec2(1600.0, 1500.0)).with_pixels_per_point(2.0).wgpu().build_eframe(|cc| TextureCraftApp::new(cc, session));
+    harness.state_mut().ui.prefs.language = "en".into();
+    // The test's stand-in arrow would hide the hovered i
+    harness.set_render_cursor(false);
+    harness.run_steps(4);
+    let tips = [
+        ("Paints only the surface the projector sees first; parts hidden behind it stay unpainted.", "depth"),
+        ("Leaves out faces turned away from the projector, so the fill doesn't run onto their back.", "backface"),
+    ];
+    for (tip, name) in tips {
+        let info = harness.get_by_label(tip).rect().center();
+        harness.hover_at(info);
+        harness.run_steps(60);
+        save(&mut harness, &output_dir, &format!("info-{name}-medium"));
+    }
+    let info = harness.get_by_label(tips[0].0).rect().center();
+    for (brightness, name) in [(Brightness::Dark, "dark"), (Brightness::Light, "light")] {
+        harness.state_mut().ui.prefs.brightness = brightness;
+        harness.hover_at(info);
+        harness.run_steps(60);
+        save(&mut harness, &output_dir, &format!("info-depth-{name}"));
+    }
+}
+
+/// The right-click Properties popup on a UV fill: its jump tabs with Symmetry hovered, Material clicked, then wheeled up to Symmetry; `TC_UI_THEMES` set adds the dark and light themes
+#[test]
+#[ignore]
+fn popup_tabs_snapshots() {
+    use egui::{Event, Modifiers, PointerButton};
+    use serde_json::json;
+    use texturecraft_engine::execute;
+
+    let Some(output_dir) = std::env::var_os("TC_UI_SNAPSHOTS").map(PathBuf::from) else { return };
+    std::fs::create_dir_all(&output_dir).unwrap();
+    let mut session = texturecraft_engine::sample_session(256, 64).unwrap();
+    let layer = execute(&mut session, "layer.add.fill", &json!({"color": [0.8, 0.3, 0.1]})).unwrap()["layer"].clone();
+    execute(&mut session, "layer.fill.projection", &json!({"layer": layer, "projection": "uv"})).unwrap();
+    let mut harness =
+        Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_pixels_per_point(2.0).wgpu().build_eframe(|cc| TextureCraftApp::new(cc, session));
+    harness.state_mut().ui.prefs.language = "en".into();
+    harness.set_render_cursor(false);
+    harness.run_steps(4);
+
+    let at = harness.state().viewport_rect.center() - egui::vec2(200.0, 250.0);
+    harness.hover_at(at);
+    for pressed in [true, false] {
+        harness.event(Event::PointerButton { pos: at, button: PointerButton::Secondary, pressed, modifiers: Modifiers::NONE });
+        harness.run_steps(2);
+    }
+    harness.run_steps(4);
+    let popup = harness.ctx.memory(|memory| memory.area_rect(texturecraft_ui_egui::properties_popup::area_id())).unwrap();
+    let tab = |harness: &Harness<'_, TextureCraftApp>, name: &str| {
+        harness.get_all_by_role_and_label(egui::accesskit::Role::Tab, name).map(|tab| tab.rect()).find(|tab| popup.contains_rect(*tab)).unwrap().center()
+    };
+    let symmetry = tab(&harness, "Symmetry");
+    harness.hover_at(symmetry);
+    harness.run_steps(4);
+    save(&mut harness, &output_dir, "popup-tabs-fill-medium");
+
+    let material = tab(&harness, "Material");
+    harness.hover_at(material);
+    for pressed in [true, false] {
+        harness.event(Event::PointerButton { pos: material, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE });
+        harness.run_steps(2);
+    }
+    harness.run_steps(60);
+    save(&mut harness, &output_dir, "popup-tabs-material-medium");
+
+    harness.hover_at(popup.center());
+    harness.event(Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(0.0, 260.0),
+        modifiers: Modifiers::NONE,
+        phase: egui::TouchPhase::Move,
+        source: egui::MouseWheelSource::Unknown,
+    });
+    harness.run_steps(6);
+    save(&mut harness, &output_dir, "popup-tabs-symmetry-medium");
+
+    if std::env::var_os("TC_UI_THEMES").is_some() {
+        for (brightness, name) in [(Brightness::Dark, "dark"), (Brightness::Light, "light")] {
+            harness.state_mut().ui.prefs.brightness = brightness;
+            harness.run_steps(6);
+            save(&mut harness, &output_dir, &format!("popup-tabs-symmetry-{name}"));
+        }
+    }
+}
+
+/// Screen 07: a mask fill effect's Grayscale section from each kind of source (Uniform, image, procedural, anchor), its picker open with a tile hovered, and its Fill section; `TC_UI_THEMES` set adds the dark and light themes
+#[test]
+#[ignore]
+fn mask_fill_snapshots() {
+    use serde_json::json;
+    use texturecraft_engine::execute;
+
+    let Some(output_dir) = std::env::var_os("TC_UI_SNAPSHOTS").map(PathBuf::from) else { return };
+    std::fs::create_dir_all(&output_dir).unwrap();
+    let mut session = texturecraft_engine::sample_session(256, 64).unwrap();
+    let mut png = Vec::new();
+    let scratches = image::RgbaImage::from_fn(64, 64, |x, y| {
+        let gray = 90 + ((x * 13 + y * 7) % 90) as u8;
+        image::Rgba([gray, gray, gray, 255])
+    });
+    scratches.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+    let scratches = session.import_resource_bytes("scratches.png", png).unwrap();
+    let below = execute(&mut session, "layer.add.fill", &json!({})).unwrap()["layer"].clone();
+    let anchor = execute(&mut session, "effect.add.anchor", &json!({"layer": below, "name": "Cavity Dirt"})).unwrap()["effect"].clone();
+    let layer = execute(&mut session, "layer.add.paint", &json!({})).unwrap()["layer"].clone();
+    let effect = execute(&mut session, "effect.add.fill", &json!({"layer": layer, "target": "mask"})).unwrap()["effect"].clone();
+    execute(&mut session, "layer.select", &json!({"layer": layer, "target": effect})).unwrap();
+    let mut harness =
+        Harness::builder().with_size(egui::vec2(1600.0, 1200.0)).with_pixels_per_point(2.0).wgpu().build_eframe(|cc| TextureCraftApp::new(cc, session));
+    harness.state_mut().ui.prefs.language = "en".into();
+    harness.run_steps(4);
+    save(&mut harness, &output_dir, "mask-fill-fill");
+    harness.get_by_role_and_label(egui::Role::Tab, "Grayscale").click();
+    harness.run_steps(30);
+
+    let shot = |harness: &mut Harness<'_, TextureCraftApp>, mut source: serde_json::Value, name: &str| {
+        source["effect"] = effect.clone();
+        execute(&mut harness.state_mut().session, "layer.fill.set", &source).unwrap();
+        harness.run_steps(3);
+        settle_thumbnails(harness);
+        save(harness, &output_dir, name);
+    };
+    shot(&mut harness, json!({"value": 1.0}), "mask-fill-uniform");
+    shot(&mut harness, json!({"image": scratches}), "mask-fill-image");
+    shot(&mut harness, json!({"procedural": "Clouds", "scale": 4.0, "seed": 12}), "mask-fill-procedural");
+    // The procedural's Resolution band open, then its Size list open with a size hovered
+    let click_in_view = |harness: &mut Harness<'_, TextureCraftApp>, role: egui::Role, label: &str| {
+        harness.get_by_role_and_label(role, label).scroll_to_me();
+        harness.run_steps(3);
+        harness.get_by_role_and_label(role, label).click();
+        harness.run_steps(3);
+    };
+    click_in_view(&mut harness, egui::Role::Button, "Resolution");
+    save(&mut harness, &output_dir, "mask-fill-resolution");
+    click_in_view(&mut harness, egui::Role::ComboBox, "Texture set  ·  256");
+    let hovered = harness.get_by_role_and_label(egui::Role::ListBoxOption, "×2  ·  512").rect().center();
+    harness.hover_at(hovered);
+    save(&mut harness, &output_dir, "mask-fill-resolution-list");
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(3);
+    // The picker opened from the slot in view (Properties still scrolled to the card), a tile hovered
+    harness.get_by_role_and_label(egui::Role::ComboBox, "Grayscale").click();
+    harness.run_steps(3);
+    settle_thumbnails(&mut harness);
+    let hovered = harness.get_by_role_and_label(egui::Role::ListBoxOption, "Clouds").rect().center();
+    harness.hover_at(hovered);
+    save(&mut harness, &output_dir, "mask-fill-picker");
+    if std::env::var_os("TC_UI_THEMES").is_some() {
+        for (brightness, name) in [(Brightness::Dark, "dark"), (Brightness::Light, "light")] {
+            harness.state_mut().ui.prefs.brightness = brightness;
+            save(&mut harness, &output_dir, &format!("mask-fill-picker-{name}"));
+        }
+    }
+    harness.state_mut().ui.prefs.brightness = Brightness::MediumDark;
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(3);
+    shot(&mut harness, json!({"anchor": anchor}), "mask-fill-anchor");
+
+    shot(&mut harness, json!({"value": 1.0}), "mask-fill-uniform-again");
 }

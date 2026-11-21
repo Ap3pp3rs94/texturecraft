@@ -1,6 +1,9 @@
 //! One integration-test executable avoids linking the same dependencies for every feature.
 //! Keep feature tests in their own modules; the standalone ui_snapshots.rs target remains available.
 
+//! One integration-test executable avoids linking the same dependencies for every feature.
+//! Keep feature tests in their own modules; the standalone ui_snapshots.rs target remains available.
+
 mod alpha_parameters;
 mod bake_job_mesh;
 mod bake_mode;
@@ -29,7 +32,10 @@ mod export_settings;
 mod export_template_guards;
 mod file_dialogs;
 mod fill_channel_image;
-mod fill_projection_section;
+mod fill_material_rows;
+mod fill_projection_rows;
+mod fill_support;
+mod fill_symmetry_rows;
 mod filter_picker;
 mod frame_selection;
 mod generator_panel;
@@ -46,18 +52,24 @@ mod layers_panel;
 mod levels_editor;
 mod log_panel_680;
 mod mask_export;
+mod mask_fill_rows;
 mod mask_value_swap;
 mod named_layouts;
 mod nav_buttons;
 mod new_project_baked_maps;
 mod new_project_window;
 mod output_templates;
+mod panel_header;
 mod path_in_view;
 mod path_list;
 mod pen_pressure;
 mod polygon_fill;
+mod popup_press_close;
 mod project_config;
+mod properties_lists;
+mod properties_min_width;
 mod properties_popup;
+mod properties_scroll;
 mod rail;
 mod reference_order;
 mod rename_anchor;
@@ -76,6 +88,7 @@ mod side_panels;
 mod skew_paint;
 mod smudge_channels;
 mod snapped_lines;
+mod source_picker;
 mod split_divider;
 mod temp_dir;
 mod template_invert;
@@ -94,14 +107,65 @@ mod symmetry;
 mod symmetry_2d;
 mod tile_generator_panel;
 
-mod panel_header;
+/// eframe's in-memory storage, shared by the tests that save and restore the UI state
+#[path = "../../src/ui_state_store/memory_storage.rs"]
+mod memory_storage;
+
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use texturecraft_ui_egui::TextureCraftApp;
+
+/// Window of the Properties tests: tall enough that a whole sheet shows without scrolling
+const PROPERTIES_WINDOW: egui::Vec2 = egui::vec2(1600.0, 1400.0);
+
+// Small texture and bake sizes keep the sample session fast; the panels don't depend on them
 const TEXTURE_RESOLUTION: u32 = 256;
 const BAKE_RESOLUTION: u32 = 64;
+
+/// Frames for the first layout and fonts to settle
 const STARTUP_FRAMES: usize = 4;
+
+/// Frames for a click or key to reach the panels and its change to show
 const SETTLE_FRAMES: usize = 3;
+
+/// Frames between the moves of a drag, and between a press and its release
+const DRAG_STEP_FRAMES: usize = 2;
+
+/// Frames for an input that redraws Properties (another selection, source or operator) to show
+const REDRAW_FRAMES: usize = 4;
+
+/// One wheel notch over the view, in points
+const WHEEL_NOTCH: f32 = 60.0;
+
+/// How far left of a list's button a click lands, clear of the list and its popup
+const OUTSIDE_OFFSET: f32 = 400.0;
+
+/// A Properties list that `open` opens (returning its button's rect) leaves the view its wheel, and closes on Escape and on a click outside
+fn assert_list_leaves_the_wheel_and_closes(harness: &mut Harness<'_, TextureCraftApp>, open: impl Fn(&mut Harness<'_, TextureCraftApp>) -> egui::Rect) {
+    open(harness);
+    assert!(egui::Popup::is_any_open(&harness.ctx), "the list opens");
+    let distance = harness.state().session.camera.distance;
+    harness.hover_at(harness.state().viewport_rect.center());
+    harness.event(egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(0.0, WHEEL_NOTCH),
+        phase: egui::TouchPhase::Move,
+        source: egui::MouseWheelSource::Wheel,
+        modifiers: egui::Modifiers::NONE,
+    });
+    harness.run_steps(REDRAW_FRAMES);
+    assert_ne!(harness.state().session.camera.distance, distance, "the wheel over the view zooms with the list open");
+
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(SETTLE_FRAMES);
+    assert!(!egui::Popup::is_any_open(&harness.ctx), "Escape closes the list");
+
+    let button = open(harness);
+    click_at(harness, egui::pos2(button.min.x - OUTSIDE_OFFSET, button.min.y));
+    assert!(!egui::Popup::is_any_open(&harness.ctx), "a click outside closes the list");
+}
+
+/// Presses and releases the primary button at `at` without moving, as a pointer click does
 fn click_at(harness: &mut Harness<'_, TextureCraftApp>, at: egui::Pos2) {
     harness.hover_at(at);
     for pressed in [true, false] {
@@ -112,6 +176,13 @@ fn click_at(harness: &mut Harness<'_, TextureCraftApp>, at: egui::Pos2) {
     harness.run_steps(SETTLE_FRAMES);
 }
 
+/// Clicks the middle of the widget with `role` and `label` through the pointer
+fn click_widget(harness: &mut Harness<'_, TextureCraftApp>, role: egui::Role, label: &str) {
+    let at = harness.get_by_role_and_label(role, label).rect().center();
+    click_at(harness, at);
+}
+
+/// The close button nearest the right of a docked panel's `title` (its tab or header title), on the same row
 fn panel_close_button(harness: &Harness<'_, TextureCraftApp>, title: egui::Rect) -> egui::Rect {
     harness
         .get_all_by_role(egui::Role::Button)
@@ -121,3 +192,5 @@ fn panel_close_button(harness: &Harness<'_, TextureCraftApp>, title: egui::Rect)
         .min_by(|a, b| a.min.x.total_cmp(&b.min.x))
         .expect("a close button right of the title")
 }
+
+mod filter_support;

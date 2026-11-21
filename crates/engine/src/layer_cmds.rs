@@ -3,15 +3,30 @@
 
 use serde_json::{Value, json};
 use texturecraft_core::{
-    BlendMode, Channel, ChannelBlend, ChannelKind, EffectKind, Fill, Layer, LayerId, LayerKind, NormalFormat, Procedural, ProceduralKind, Project, Projection,
-    Source,
+    Backface, BlendMode, Channel, ChannelBlend, ChannelKind, Decal, EffectKind, Fill, FillSymmetry, Filtering, Layer, LayerId, LayerKind, NormalFormat,
+    Procedural, ProceduralKind, Project, Projection, Projector, Sampling, ScaleMode, ShapeCrop, Source, SymmetryKind, UvTransform, UvWrap,
 };
+use texturecraft_paint::alphas;
 
 use crate::commands::{
     CommandSpec, always, bad, blend_param, boolp, channel_param, color_param, content_param, f32p, has_layer, layer_param, normal_format_param, strp, u64p,
 };
 use crate::layer_selection::{batch_param, ids_json};
 use crate::{EngineError, Result, Session, cmd, session::StackTarget};
+
+/// One full turn, in degrees (the brush's, so every angle wraps on the same turn)
+pub(crate) use texturecraft_core::FULL_TURN_DEGREES;
+
+/// The smallest scale or tiling a fill's placement takes
+pub const MIN_SCALE: f32 = 0.001;
+/// The largest scale, tiling or offset a fill's placement takes
+pub const MAX_PLACEMENT: f32 = 1000.0;
+
+/// How far a warp's corner may be pulled from the frame's centre, in frame sizes
+const MAX_CORNER_REACH: f32 = 100.0;
+
+/// The largest Projection Depth, in lengths of the frame's longer side
+pub(crate) const MAX_PROJECTION_DEPTH: f32 = 100.0;
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
@@ -96,7 +111,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Set fill source",
             [],
             None,
-            "{layer? | effect?: content fill effect id, channel, color?: ([r,g,b] linear or \"#rrggbb\" sRGB)|value?|procedural?: kind, scale?, seed?, contrast?, balance?, invert?, low?, high?, resolution?: auto|textureSet|uvTile|custom, customResolution?, resolutionFactor?: -3..3, tile?: {Tile Generator settings in camelCase, as project.inspect shows them}, tileDefaults?: true (alone, they edit the channel's pattern)|image?, normalFormat?: openGl|directX (the image's normal map convention; alone, it changes the channel's image)|anchor?: anchor effect id, anchorChannel?, colors?: gradient map of a color channel's procedural or anchor, 1 to 16 colors dark to light ([r, g, b] linear or \"#rrggbb\" sRGB; [] removes it; absent keeps it; alone, it changes the channel's source)|gradientMap?: true (turns the color stops on from the channel's current procedural or anchor: a procedural's low, their midpoint and high; an anchor's black, gray and white; stops already there stay), enabled?, solo?: true (this channel on, every other one off)}",
+            "{layer? | effect?: content fill effect id | mask fill effect id (one grayscale source: no channel, enabled, solo or normalFormat), channel, color?: ([r,g,b] linear or \"#rrggbb\" sRGB)|value?|procedural?: kind, scale?, seed?, contrast?, balance?, invert?, low?, high? (the same kind keeps what is not given), resolution?: auto|textureSet|uvTile|custom, customResolution?, resolutionFactor?: -3..3, tile?: {Tile Generator settings in camelCase, as project.inspect shows them}, tileDefaults?: true (alone, they edit the channel's pattern)|image?|alpha?: library alpha id or name (its picture becomes the image resource alpha_<id>.png), normalFormat?: openGl|directX (the image's normal map convention; alone, it changes the channel's image)|anchor?: anchor effect id, anchorChannel?, colors?: gradient map of a color channel's procedural or anchor, 1 to 16 colors dark to light ([r, g, b] linear or \"#rrggbb\" sRGB; [] removes it; absent keeps it; alone, it changes the channel's source)|gradientMap?: true (turns the color stops on from the channel's current procedural or anchor: a procedural's low, their midpoint and high; an anchor's black, gray and white; stops already there stay), enabled?, solo?: true (this channel on, every other one off)}",
             has_layer,
             fill_set
         ),
@@ -105,7 +120,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Set fill projection",
             [],
             None,
-            "{layer? | effect?: content fill effect id, projection?: uv|triplanar|planar|spherical|cylindrical (default: the current one), scale?: number | [u, v] (uv), rotation?: degrees (uv), offset?: [u, v] (uv) | [x, y, z] (triplanar, planar), sharpness?: 1..64 (triplanar), axis?: 0|1|2 (planar, cylindrical)} — what is not given keeps its value",
+            "{layer? | effect?: content or mask fill effect id, projection?: uvTile (Fill (Match per UV Tile))|uv|triplanar|planar|spherical|cylindrical|warp (default: the current one; a new warp's frame sits around the mesh, seen from the front), tiling?: number | [u, v] (UV transformations, every projection; uv: same as scale), rotation?: degrees (UV transformations), uvOffset?: [u, v] (UV transformations of a 3D projection), scale?: number | [u, v] (uv: the tiling; 3D projections: one number), offset?: [u, v] (uv) | [x, y, z] (3D projections), projectorRotation?: [x, y, z] degrees, projectorScale?: number | [x, y, z] (3D projection settings), shapeCrop?: cropped|extendsOutside (3D projections), backfaceCulling?: bool, backfaceAngle?: degrees, backfaceHardness?: 0..1 (planar, cylindrical), depthCulling?: bool, depthCullingHardness?: 0..1 (planar, warp; surfaces hidden from the projector behind others get none of it; new planar and warp projections start with it on at 0.75), sharpness?: 1..64 (triplanar), warpCorners?: [[x, y] × 4] (warp: top left, top right, bottom right, bottom left, across and up in frame sizes from its centre; unpulled = ±0.5), projectionDepth?: lengths of the frame's longer side it reaches in front of and behind it when cropped (warp), angle?: 1..360 degrees one repeat spans (cylindrical), axis?: 0|1|2 (planar, cylindrical), filtering?: bilinearHq|bilinearSharp|nearest (how images are read), wrap?: repeat|repeatHorizontally|repeatVertically|none (past the 0..1 tile; not tri-planar), symmetry?: bool (copies of a 3D projection; UV projections have none), symmetryType?: mirror|radial, symmetryAxis?: 0|1|2 (the mirror plane's normal or the turning axis), flipCopy?: [u, v] (turn the copies' images over), axisPosition?: number | [x, y, z] (where the plane or axis passes, -1..1 mesh radii from the mesh's centre), symmetryCount?: 2..64 (radial copies, the original included), angleSpan?: 1..360 degrees (radial copies spread over it; 360 spaces them evenly)} — what is not given keeps its value",
             has_layer,
             fill_projection
         ),
@@ -491,25 +506,28 @@ fn blending_set(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(Value::Null)
 }
 
-/// Which fill `layer.fill.*` edits: a fill layer's (`layer`) or a content fill effect's
-/// (`effect`).
+/// Which fill `layer.fill.*` edits: a fill layer's (`layer`), a content fill effect's
+/// (`effect`) or a mask fill effect's (`effect`: one grayscale source, no channels or material).
 #[derive(Clone, Copy)]
-enum FillTarget {
+pub(crate) enum FillTarget {
     Layer(LayerId),
     Effect(LayerId),
+    Mask(LayerId),
 }
 
-fn fill_target(s: &Session, p: &Value, cmd: &str) -> Result<FillTarget> {
+pub(crate) fn fill_target(s: &Session, p: &Value, cmd: &str) -> Result<FillTarget> {
     match u64p(p, "effect").map(LayerId) {
-        Some(e) => match s.doc.project.effect(e) {
-            Some((_, x)) if matches!(x.kind, EffectKind::Material(_)) => Ok(FillTarget::Effect(e)),
-            _ => Err(bad(cmd, format!("{} is not a content fill effect", e.0))),
+        Some(e) => match s.doc.project.effect(e).map(|(_, x)| &x.kind) {
+            Some(EffectKind::Material(_)) => Ok(FillTarget::Effect(e)),
+            Some(EffectKind::Fill { .. }) => Ok(FillTarget::Mask(e)),
+            _ => Err(bad(cmd, format!("{} is not a fill effect", e.0))),
         },
         None => Ok(FillTarget::Layer(content_param(s, cmd, p)?)),
     }
 }
 
-fn fill_mut(s: &mut Session, target: FillTarget) -> Result<&mut Fill> {
+/// The material of the fill at `target`; a mask fill has none
+pub(crate) fn fill_mut(s: &mut Session, target: FillTarget) -> Result<&mut Fill> {
     match target {
         FillTarget::Layer(id) => match &mut s.doc.project.layer_mut(id)?.kind {
             LayerKind::Fill(f) => Ok(f),
@@ -519,12 +537,36 @@ fn fill_mut(s: &mut Session, target: FillTarget) -> Result<&mut Fill> {
             Some(EffectKind::Material(f)) => Ok(f),
             _ => Err(EngineError::Other("not a content fill effect".into())),
         },
+        FillTarget::Mask(_) => Err(EngineError::Other("a mask fill has one grayscale source and no channels or material".into())),
+    }
+}
+
+/// How the fill at `target` is projected and sampled: every fill has both
+pub(crate) fn placement_mut(s: &mut Session, target: FillTarget) -> Result<(&mut Projection, &mut Sampling)> {
+    if let FillTarget::Mask(e) = target {
+        return match s.doc.project.effect_mut(e).map(|x| &mut x.kind) {
+            Some(EffectKind::Fill { projection, sampling, .. }) => Ok((projection, sampling)),
+            _ => Err(EngineError::Other("not a mask fill effect".into())),
+        };
+    }
+    let fill = fill_mut(s, target)?;
+    Ok((&mut fill.projection, &mut fill.sampling))
+}
+
+/// The grayscale source of the mask fill effect `effect`
+fn mask_source_mut(s: &mut Session, effect: LayerId) -> Result<&mut Source> {
+    match s.doc.project.effect_mut(effect).map(|x| &mut x.kind) {
+        Some(EffectKind::Fill { source, .. }) => Ok(source),
+        _ => Err(EngineError::Other("not a mask fill effect".into())),
     }
 }
 
 fn fill_set(session: &mut Session, params: &Value) -> Result<Value> {
     const CMD: &str = "layer.fill.set";
     let target = fill_target(session, params, CMD)?;
+    if let FillTarget::Mask(effect) = target {
+        return mask_fill_set(session, params, effect);
+    }
     let channel = channel_param(CMD, params, "channel")?.ok_or_else(|| bad(CMD, "`channel` is required"))?;
 
     // `solo`: this channel on, every other one off
@@ -538,10 +580,15 @@ fn fill_set(session: &mut Session, params: &Value) -> Result<Value> {
     }
 
     let source = fill_source_from(session, params, (target, channel), normal_format)?;
+    // A library alpha that became the source joins the project's images
+    let library_alpha = match &source {
+        Some(Source::Image { name, .. }) => crate::fill_alpha::library_alpha_of(name).filter(|_| strp(params, "image").is_none()),
+        _ => None,
+    };
     if source.is_none() && enabled.is_none() && normal_format.is_none() && colors.is_none() && !init_ramp {
         return Err(bad(
             CMD,
-            "give `color`, `value`, `procedural`, `image`, `anchor`, pattern settings (`tile`, `resolution`…), `colors`, `gradientMap`, `normalFormat`, `enabled` or `solo`",
+            "give `color`, `value`, `procedural`, `image`, `alpha`, `anchor`, pattern settings (`tile`, `resolution`…), `colors`, `gradientMap`, `normalFormat`, `enabled` or `solo`",
         ));
     }
 
@@ -552,6 +599,9 @@ fn fill_set(session: &mut Session, params: &Value) -> Result<Value> {
     // Changing only the normal format or gradient stops leaves the layer channel on or off
     let touches_channel = source.is_some() || enabled.is_some();
     session.edit("Set fill", |session| {
+        if let Some(alpha) = library_alpha {
+            session.add_library_alpha(alpha)?;
+        }
         let fill = fill_mut(session, target)?;
 
         // `normalFormat` alone: the convention of the channel's image
@@ -562,11 +612,17 @@ fn fill_set(session: &mut Session, params: &Value) -> Result<Value> {
             }
         }
 
+        // A channel set on its own (its source or its gradient map): the sources are no longer one whole material
+        if source.is_some() || colors.is_some() || init_ramp {
+            fill.material = None;
+        }
+
         let current = fill.sources.get(&channel);
         let colors = if init_ramp { initial_ramp(channel, source.as_ref(), current)? } else { colors };
         let source = with_ramp(channel, current, source, colors)?;
 
         match target {
+            FillTarget::Mask(_) => return Err(bad("layer.fill.set", "a mask fill has no channels")),
             // A fill effect's channel is on while it has a source
             FillTarget::Effect(_) if enabled == Some(false) => {
                 fill.sources.remove(&channel);
@@ -601,6 +657,70 @@ fn fill_set(session: &mut Session, params: &Value) -> Result<Value> {
     Ok(Value::Null)
 }
 
+/// `layer.fill.set` on mask fill effect `effect`: its one grayscale source (no `channel`, `enabled`, `solo` or `normalFormat`)
+fn mask_fill_set(s: &mut Session, p: &Value, effect: LayerId) -> Result<Value> {
+    const CMD: &str = "layer.fill.set";
+    if ["channel", "enabled", "solo", "normalFormat"].iter().any(|key| p.get(key).is_some()) {
+        return Err(bad(CMD, "a mask fill has one grayscale source: leave out `channel`, `enabled`, `solo` and `normalFormat`"));
+    }
+    let current = mask_source_mut(s, effect)?.clone();
+    let low = color_param(CMD, p, "low")?;
+    let high = color_param(CMD, p, "high")?;
+    let color = color_param(CMD, p, "color")?;
+    let value = color_param(CMD, p, "value")?;
+    let mut library_alpha = None;
+    let source = if let Some(kind) = strp(p, "procedural") {
+        let kind = ProceduralKind::parse(kind).ok_or_else(|| bad(CMD, format!("unknown procedural `{kind}`")))?;
+        procedural_from(p, kind, Some(&current), [low, high])?
+    } else if let Some(c) = color.or(value) {
+        Source::Uniform(c.map(|gray| gray.clamp(0.0, 1.0)))
+    } else if let Some(name) = strp(p, "image") {
+        Source::image(name.to_string())
+    } else if let Some(name) = strp(p, "alpha") {
+        let alpha = alphas::find(name).ok_or_else(|| bad(CMD, format!("unknown alpha `{name}`")))?;
+        library_alpha = Some(alpha);
+        Source::image(crate::fill_alpha::resource_name(alpha))
+    } else if let Some(anchor) = u64p(p, "anchor") {
+        let reader = s.doc.project.effect(effect).map(|(owner, _)| owner).ok_or_else(|| bad(CMD, "the fill is not in a layer"))?;
+        // A mask reads one channel of the anchor's stack as gray: the one it read, else Height
+        let kept = match current {
+            Source::Anchor { channel, .. } => channel,
+            _ => Channel::Height,
+        };
+        let channel = channel_param(CMD, p, "anchorChannel")?.unwrap_or(kept);
+        crate::mask_cmds::anchor_source(s, CMD, reader, LayerId(anchor), channel)?
+    } else if crate::procedural_params::has_pattern_settings(p) {
+        // Pattern settings alone edit the mask fill's current pattern
+        let Source::Procedural { pattern, .. } = &current else {
+            return Err(bad(CMD, "the mask fill has no pattern: give `procedural` with its settings"));
+        };
+        procedural_from(p, pattern.kind, Some(&current), [None, None])?
+    } else {
+        return Err(bad(CMD, "give `value`, `procedural`, `image`, `alpha` or `anchor`"));
+    };
+    s.edit("Set fill", |s| {
+        if let Some(alpha) = library_alpha {
+            s.add_library_alpha(alpha)?;
+        }
+        *mask_source_mut(s, effect)? = source;
+        Ok(())
+    })?;
+    Ok(Value::Null)
+}
+
+/// The procedural source `params` ask for with `low`/`high` already parsed: a pattern of the same kind as `current` keeps what
+/// `params` do not give; another kind starts from its defaults
+fn procedural_from(params: &Value, kind: ProceduralKind, current: Option<&Source>, [low, high]: [Option<[f32; 3]>; 2]) -> Result<Source> {
+    let (mut pattern, current_low, current_high) = match current {
+        Some(Source::Procedural { pattern, low, high, .. }) if pattern.kind == kind => (pattern.clone(), *low, *high),
+        _ => (Procedural::new(kind), [0.0; 3], [1.0; 3]),
+    };
+
+    crate::procedural_params::pattern_basics_from(params, &mut pattern);
+    crate::procedural_params::pattern_settings_from("layer.fill.set", params, &mut pattern)?;
+    Ok(Source::Procedural { pattern, low: low.unwrap_or(current_low), high: high.unwrap_or(current_high), ramp: Vec::new() })
+}
+
 /// The source `params` give fill channel `channel` of `target`, or None when they only switch it or set its image's normal format
 fn fill_source_from(
     session: &mut Session,
@@ -609,26 +729,15 @@ fn fill_source_from(
     normal_format: Option<NormalFormat>,
 ) -> Result<Option<Source>> {
     const CMD: &str = "layer.fill.set";
-    let low = color_param(CMD, params, "low")?.unwrap_or([0.0; 3]);
-    let high = color_param(CMD, params, "high")?.unwrap_or([1.0; 3]);
+    let low = color_param(CMD, params, "low")?;
+    let high = color_param(CMD, params, "high")?;
     let uniform = color_param(CMD, params, "color")?.or(color_param(CMD, params, "value")?);
 
     if let Some(name) = strp(params, "procedural") {
         let kind = ProceduralKind::parse(name).ok_or_else(|| bad(CMD, format!("unknown procedural `{name}`")))?;
-        let mut pattern = Procedural::new(kind);
-        crate::procedural_params::pattern_basics_from(params, &mut pattern);
-
-        // A pattern of the same kind keeps its resolution and Tile Generator settings
-        let current = fill_mut(session, target)?.sources.get(&channel);
-        if let Some(Source::Procedural { pattern: current, .. }) = current
-            && current.kind == kind
-        {
-            pattern.resolution = current.resolution;
-            pattern.tile = current.tile.clone();
-        }
-
-        crate::procedural_params::pattern_settings_from(CMD, params, &mut pattern)?;
-        return Ok(Some(Source::Procedural { pattern, low, high, ramp: Vec::new() }));
+        // A pattern of the same kind keeps what `params` do not give; another kind starts from its defaults
+        let current = fill_mut(session, target)?.sources.get(&channel).cloned();
+        return Ok(Some(procedural_from(params, kind, current.as_ref(), [low, high])?));
     }
 
     if let Some(color) = uniform {
@@ -639,10 +748,15 @@ fn fill_source_from(
         return Ok(Some(Source::Image { name: name.to_string(), normal_format: normal_format.unwrap_or_default() }));
     }
 
+    if let Some(name) = strp(params, "alpha") {
+        let alpha = alphas::find(name).ok_or_else(|| bad(CMD, format!("unknown alpha `{name}`")))?;
+        return Ok(Some(Source::Image { name: crate::fill_alpha::resource_name(alpha), normal_format: normal_format.unwrap_or_default() }));
+    }
+
     if let Some(anchor) = u64p(params, "anchor") {
         let reader = match target {
             FillTarget::Layer(id) => Some(id),
-            FillTarget::Effect(effect) => session.doc.project.effect(effect).map(|(owner, _)| owner),
+            FillTarget::Effect(effect) | FillTarget::Mask(effect) => session.doc.project.effect(effect).map(|(owner, _)| owner),
         };
         let reader = reader.ok_or_else(|| bad(CMD, "the fill is not in a layer"))?;
         let anchor_channel = channel_param(CMD, params, "anchorChannel")?.unwrap_or(channel);
@@ -731,83 +845,237 @@ fn with_ramp(channel: Channel, current: Option<&Source>, source: Option<Source>,
     Ok(Some(source))
 }
 
-/// Parse projection settings, retaining unspecified fields when the projection kind stays the same.
-pub(crate) fn projection_from(params: &Value, command: &str, current: Option<&Projection>) -> Result<Projection> {
-    projection_from_fields(params, command, current, true)
+/// The projection `p` asks for: fields it does not give keep their values from `current` when that is of the same kind (or `p` names no kind), and the kind's defaults otherwise; a new warp starts from frame `fit`
+/// A new fill's projection of kind `id` (`uv`, `uvTile`, `triplanar`, `planar`, `spherical`, `cylindrical`, or a `warp` from frame `fit`)
+pub(crate) fn new_projection(id: &str, fit: impl FnOnce() -> Decal) -> Option<Projection> {
+    match id {
+        "warp" => Some(Projection::warp(fit())),
+        _ => new_unframed_projection(id),
+    }
 }
 
-/// A procedural mask can assign the command's scale to its pattern instead of its projection.
-pub(crate) fn projection_from_fields(params: &Value, command: &str, current: Option<&Projection>, read_scale: bool) -> Result<Projection> {
-    const MIN_SCALE: f32 = 0.001;
-    const MAX_SCALE: f32 = 1000.0;
-    const MAX_OFFSET: f32 = 1000.0;
-    const DEFAULT_SHARPNESS: f32 = 8.0;
-    const MAX_SHARPNESS: f32 = 64.0;
+/// The ids [`new_unframed_projection`] takes, one per kind
+pub(crate) const UNFRAMED_PROJECTION_IDS: [&str; 6] = ["uv", "uvTile", "triplanar", "planar", "spherical", "cylindrical"];
 
-    let named = match strp(params, "projection") {
+/// A new fill's projection of kind `id`, any kind but a warp (which needs a frame)
+pub(crate) fn new_unframed_projection(id: &str) -> Option<Projection> {
+    let projection = match id {
+        "uv" => Projection::default(),
+        "uvTile" => Projection::UvTile,
+        "triplanar" | "tri-planar" => Projection::triplanar(),
+        "planar" => Projection::Planar { scale: 1.0, axis: 2, offset: [0.0; 3], uv: Default::default(), projector: Projector::depth_culled(), placed: None },
+        "spherical" => Projection::Spherical { scale: 1.0, uv: Default::default(), offset: [0.0; 3], projector: Default::default() },
+        "cylindrical" => {
+            Projection::Cylindrical { scale: 1.0, axis: 1, uv: Default::default(), offset: [0.0; 3], projector: Default::default(), angle: FULL_TURN_DEGREES }
+        }
+        _ => return None,
+    };
+    Some(projection)
+}
+
+/// The projection `p` asks for: fields it does not give keep their values from `current` when that is of the same kind (or `p` names no kind), and the kind's defaults otherwise; a new warp starts from frame `fit`
+pub(crate) fn projection_from(p: &Value, cmd: &str, current: Option<&Projection>, fit: impl FnOnce() -> Decal) -> Result<Projection> {
+    let named = match strp(p, "projection") {
         None => None,
-        Some("uv") => Some(Projection::default()),
-        Some("triplanar" | "tri-planar") => Some(Projection::Triplanar { scale: 1.0, sharpness: DEFAULT_SHARPNESS, offset: [0.0; 3] }),
-        Some("planar") => Some(Projection::Planar { scale: 1.0, axis: 2, offset: [0.0; 3] }),
-        Some("spherical") => Some(Projection::Spherical { scale: 1.0 }),
-        Some("cylindrical") => Some(Projection::Cylindrical { scale: 1.0, axis: 1 }),
-        Some(other) => return Err(bad(command, format!("unknown projection `{other}`"))),
+        Some("warp") if matches!(current, Some(Projection::Warp { .. })) => current.cloned(),
+        Some(id) => Some(new_projection(id, fit).ok_or_else(|| bad(cmd, format!("unknown projection `{id}`")))?),
     };
     let mut projection = match (named, current) {
         (Some(named), Some(current)) if std::mem::discriminant(&named) == std::mem::discriminant(current) => current.clone(),
         (Some(named), _) => named,
         (None, current) => current.cloned().unwrap_or_default(),
     };
+    let scale = floats::<2>(p, "scale", MIN_SCALE, MAX_PLACEMENT);
+    let tiling = floats::<2>(p, "tiling", MIN_SCALE, MAX_PLACEMENT);
+    let rotation = f32p(p, "rotation").map(|degrees| degrees.rem_euclid(FULL_TURN_DEGREES));
+    let axis = u64p(p, "axis").map(|axis| axis.min(2) as u8);
 
-    let new_scale = if read_scale { floats::<2>(params, "scale", MIN_SCALE, MAX_SCALE) } else { None };
-    let new_axis = u64p(params, "axis").map(|axis| axis.min(2) as u8);
+    // The UV transformations of a 3D projection: tiling, rotation and an offset across the surface
+    let place = |uv: &mut UvTransform| {
+        uv.tiling = tiling.unwrap_or(uv.tiling);
+        uv.rotation = rotation.unwrap_or(uv.rotation);
+        uv.offset = floats(p, "uvOffset", -MAX_PLACEMENT, MAX_PLACEMENT).unwrap_or(uv.offset);
+    };
+
+    // The 3D projection settings: the projector's offset, turn and per-axis scale
+    let projector_offset = floats::<3>(p, "offset", -MAX_PLACEMENT, MAX_PLACEMENT);
+    let crop = match strp(p, "shapeCrop") {
+        None => None,
+        Some(id) => Some(ShapeCrop::from_id(id).ok_or_else(|| bad(cmd, format!("unknown shapeCrop `{id}`: cropped or extendsOutside")))?),
+    };
+    let turn = |projector: &mut Projector| {
+        projector.rotation = floats(p, "projectorRotation", -FULL_TURN_DEGREES, FULL_TURN_DEGREES).unwrap_or(projector.rotation);
+        projector.scale = floats(p, "projectorScale", -MAX_PLACEMENT, MAX_PLACEMENT).map_or(projector.scale, |scale| scale.map(signed_scale));
+        projector.crop = crop.unwrap_or(projector.crop);
+        projector.backface.on = p.get("backfaceCulling").and_then(Value::as_bool).unwrap_or(projector.backface.on);
+        projector.backface.angle = f32p(p, "backfaceAngle").map_or(projector.backface.angle, |angle| clamp_to(angle, &Backface::ANGLE_RANGE));
+        projector.backface.hardness = f32p(p, "backfaceHardness").map_or(projector.backface.hardness, |hardness| hardness.clamp(0.0, 1.0));
+        projector.depth.on = p.get("depthCulling").and_then(Value::as_bool).unwrap_or(projector.depth.on);
+        projector.depth.hardness = f32p(p, "depthCullingHardness").map_or(projector.depth.hardness, |hardness| hardness.clamp(0.0, 1.0));
+    };
     match &mut projection {
-        Projection::Uv { scale, rotation, offset } => {
-            *scale = new_scale.unwrap_or(*scale);
-            *rotation = f32p(params, "rotation").map_or(*rotation, |degrees| degrees.rem_euclid(360.0));
-            *offset = floats(params, "offset", -MAX_OFFSET, MAX_OFFSET).unwrap_or(*offset);
+        Projection::Uv { scale: uv_scale, rotation: uv_rotation, offset } => {
+            // A UV projection's scale is its tiling
+            *uv_scale = tiling.or(scale).unwrap_or(*uv_scale);
+            *uv_rotation = rotation.unwrap_or(*uv_rotation);
+            *offset = floats(p, "offset", -MAX_PLACEMENT, MAX_PLACEMENT).unwrap_or(*offset);
         }
-        Projection::Triplanar { scale, sharpness, offset } => {
-            *scale = new_scale.map_or(*scale, |axes| axes[0]);
-            *sharpness = f32p(params, "sharpness").map_or(*sharpness, |value| value.clamp(1.0, MAX_SHARPNESS));
-            *offset = floats(params, "offset", -MAX_OFFSET, MAX_OFFSET).unwrap_or(*offset);
+        Projection::UvTile => {}
+        Projection::Triplanar { scale: projection_scale, sharpness, offset, uv, projector } => {
+            *projection_scale = scale.map_or(*projection_scale, |across| across[0]);
+            *sharpness = f32p(p, "sharpness").map_or(*sharpness, |given| clamp_to(given, &Projection::TRIPLANAR_SHARPNESS_RANGE));
+            *offset = projector_offset.unwrap_or(*offset);
+            place(uv);
+            turn(projector);
         }
-        Projection::Planar { scale, axis, offset } => {
-            *scale = new_scale.map_or(*scale, |axes| axes[0]);
-            *axis = new_axis.unwrap_or(*axis);
-            *offset = floats(params, "offset", -MAX_OFFSET, MAX_OFFSET).unwrap_or(*offset);
+        Projection::Planar { scale: projection_scale, axis: projection_axis, offset, uv, projector, .. } => {
+            *projection_scale = scale.map_or(*projection_scale, |across| across[0]);
+            *projection_axis = axis.unwrap_or(*projection_axis);
+            *offset = projector_offset.unwrap_or(*offset);
+            place(uv);
+            turn(projector);
         }
-        Projection::Spherical { scale } => *scale = new_scale.map_or(*scale, |axes| axes[0]),
-        Projection::Cylindrical { scale, axis } => {
-            *scale = new_scale.map_or(*scale, |axes| axes[0]);
-            *axis = new_axis.unwrap_or(*axis);
+        Projection::Spherical { scale: projection_scale, uv, offset, projector } => {
+            *projection_scale = scale.map_or(*projection_scale, |across| across[0]);
+            *offset = projector_offset.unwrap_or(*offset);
+            place(uv);
+            turn(projector);
         }
-        Projection::Decal(_) => {}
-    }
+        Projection::Cylindrical { scale: projection_scale, axis: projection_axis, uv, offset, projector, angle } => {
+            *projection_scale = scale.map_or(*projection_scale, |across| across[0]);
+            *angle = f32p(p, "angle").map_or(*angle, |given| clamp_to(given, &Projection::CYLINDER_ANGLE_RANGE));
+            *projection_axis = axis.unwrap_or(*projection_axis);
+            *offset = projector_offset.unwrap_or(*offset);
+            place(uv);
+            turn(projector);
+        }
+        Projection::Warp { corners, depth, uv, projector, .. } => {
+            // A warp has no scale or offset of its own: its frame places it, so they would change nothing
+            if p.get("scale").is_some() || p.get("offset").is_some() {
+                return Err(bad(cmd, "a warp is placed by its frame: set frameOffset or frameScale with layer.decal.set"));
+            }
 
+            *corners = warp_corners(p, cmd)?.unwrap_or(*corners);
+            *depth = f32p(p, "projectionDepth").map_or(*depth, |given| given.clamp(0.0, MAX_PROJECTION_DEPTH));
+            place(uv);
+            turn(projector);
+        }
+    }
     Ok(projection)
 }
 
-/// `key` as `N` finite numbers clamped to `lo..=hi`: an array of `N`, or one number for all.
+/// `value` held within `range`
+fn clamp_to(value: f32, range: &std::ops::RangeInclusive<f32>) -> f32 {
+    value.clamp(*range.start(), *range.end())
+}
+
+/// The projection `params` asks for, as [`projection_from`]; without `read_scale` its `scale` is left out (a procedural mask's scale is its pattern's)
+pub(crate) fn projection_from_fields(
+    params: &Value,
+    command: &str,
+    current: Option<&Projection>,
+    read_scale: bool,
+    fit: impl FnOnce() -> Decal,
+) -> Result<Projection> {
+    let mut placement = params.clone();
+    if !read_scale && let Some(fields) = placement.as_object_mut() {
+        fields.remove("scale");
+    }
+    projection_from(&placement, command, current, fit)
+}
+
+/// The `warpCorners` param: four [across, up] corners in frame sizes from the frame's centre, finite and within reach of the frame (None when not given)
+fn warp_corners(p: &Value, cmd: &str) -> Result<Option<[[f32; 2]; 4]>> {
+    let Some(given) = p.get("warpCorners") else { return Ok(None) };
+
+    let malformed = || bad(cmd, "warpCorners is four [across, up] pairs of finite numbers");
+    let list = given.as_array().filter(|list| list.len() == 4).ok_or_else(malformed)?;
+    let mut corners = Projection::FRAME_CORNERS;
+    for (corner, value) in corners.iter_mut().zip(list) {
+        let pair = value.as_array().filter(|pair| pair.len() == 2).ok_or_else(malformed)?;
+        for (axis, number) in corner.iter_mut().zip(pair) {
+            let reach = number.as_f64().map(|number| number as f32).filter(|number| number.is_finite()).ok_or_else(malformed)?;
+            *axis = reach.clamp(-MAX_CORNER_REACH, MAX_CORNER_REACH);
+        }
+    }
+    Ok(Some(corners))
+}
+
+/// `current` with the `filtering`, `wrap`, `scaleMode` and symmetry params applied
+pub(crate) fn sampling_from(p: &Value, cmd: &str, current: Sampling) -> Result<Sampling> {
+    let mut sampling = current;
+    if let Some(id) = strp(p, "filtering") {
+        sampling.filtering = Filtering::from_id(id).ok_or_else(|| bad(cmd, format!("unknown filtering `{id}`: bilinearHq, bilinearSharp or nearest")))?;
+    }
+    if let Some(id) = strp(p, "wrap") {
+        sampling.wrap = UvWrap::from_id(id).ok_or_else(|| bad(cmd, format!("unknown wrap `{id}`: repeat, repeatHorizontally, repeatVertically or none")))?;
+    }
+    if let Some(id) = strp(p, "scaleMode") {
+        sampling.scale = ScaleMode::from_id(id).ok_or_else(|| bad(cmd, format!("unknown scaleMode `{id}`: tiling or physicalSize")))?;
+    }
+    sampling.symmetry = symmetry_from(p, cmd, sampling.symmetry)?;
+    Ok(sampling)
+}
+
+/// `current` with the `symmetry`, `symmetryType`, `symmetryAxis`, `flipCopy`, `axisPosition`, `symmetryCount` and `angleSpan` params applied
+fn symmetry_from(p: &Value, cmd: &str, current: FillSymmetry) -> Result<FillSymmetry> {
+    let mut symmetry = current;
+    symmetry.on = boolp(p, "symmetry").unwrap_or(symmetry.on);
+    if let Some(id) = strp(p, "symmetryType") {
+        symmetry.kind = SymmetryKind::from_id(id).ok_or_else(|| bad(cmd, format!("unknown symmetryType `{id}`: mirror or radial")))?;
+    }
+    if let Some(given) = p.get("symmetryAxis").filter(|given| !given.is_null()) {
+        // An index or the letter tool.brush takes for its own symmetry axis
+        let axis = match given {
+            Value::String(letter) => ["x", "y", "z"].iter().position(|name| letter.eq_ignore_ascii_case(name)).and_then(|index| u8::try_from(index).ok()),
+            index => index.as_u64().and_then(|index| u8::try_from(index).ok()).filter(|index| *index <= FillSymmetry::LAST_AXIS),
+        };
+        symmetry.axis = axis.ok_or_else(|| bad(cmd, "symmetryAxis is 0 (X), 1 (Y) or 2 (Z), or \"x\", \"y\" or \"z\""))?;
+    }
+    if let Some(flips) = p.get("flipCopy") {
+        let [Some(across), Some(down)] = flips.as_array().map(Vec::as_slice).unwrap_or_default().iter().map(Value::as_bool).collect::<Vec<_>>()[..] else {
+            return Err(bad(cmd, "flipCopy is [u, v], two booleans"));
+        };
+
+        symmetry.flip = [across, down];
+    }
+    let reach = FillSymmetry::REACH;
+    symmetry.position = floats(p, "axisPosition", -reach, reach).unwrap_or(symmetry.position);
+    if let Some(count) = u64p(p, "symmetryCount") {
+        let (fewest, most) = (u64::from(*FillSymmetry::COUNTS.start()), u64::from(*FillSymmetry::COUNTS.end()));
+        symmetry.count = u32::try_from(count.clamp(fewest, most)).unwrap_or(*FillSymmetry::COUNTS.start());
+    }
+    symmetry.span = f32p(p, "angleSpan").map_or(symmetry.span, |span| clamp_to(span, &FillSymmetry::SPANS));
+    Ok(symmetry)
+}
+
+/// `value` as one axis of a projector's scale: its size kept within [`MIN_SCALE`]..[`MAX_PLACEMENT`] on its own side, so a mirrored axis stays mirrored
+pub fn signed_scale(value: f32) -> f32 {
+    value.signum() * value.abs().clamp(MIN_SCALE, MAX_PLACEMENT)
+}
+
+/// `key` as `N` finite numbers clamped to `lo..=hi`: an array of `N`, or one number for all
 fn floats<const N: usize>(p: &Value, key: &str, lo: f32, hi: f32) -> Option<[f32; N]> {
-    let one = |x: &Value| x.as_f64().map(|f| f as f32).filter(|f| f.is_finite()).map(|f| f.clamp(lo, hi));
+    let number = |value: &Value| value.as_f64().map(|given| given as f32).filter(|given| given.is_finite()).map(|given| given.clamp(lo, hi));
     match p.get(key)? {
-        Value::Array(a) if a.len() == N => {
+        Value::Array(list) if list.len() == N => {
             let mut out = [0.0; N];
-            for (o, x) in out.iter_mut().zip(a) {
-                *o = one(x)?;
+            for (slot, value) in out.iter_mut().zip(list) {
+                *slot = number(value)?;
             }
             Some(out)
         }
-        v => one(v).map(|f| [f; N]),
+        value => number(value).map(|given| [given; N]),
     }
 }
 
 fn fill_projection(s: &mut Session, p: &Value) -> Result<Value> {
     let target = fill_target(s, p, "layer.fill.projection")?;
+    let mesh = s.mesh.clone();
     s.edit("Fill projection", |s| {
-        let fill = fill_mut(s, target)?;
-        fill.projection = projection_from(p, "layer.fill.projection", Some(&fill.projection))?;
+        let (projection, sampling) = placement_mut(s, target)?;
+        *projection = projection_from(p, "layer.fill.projection", Some(projection), || crate::warp_cmds::fitted_frame(&mesh))?;
+        *sampling = sampling_from(p, "layer.fill.projection", *sampling)?;
         Ok(())
     })?;
     Ok(Value::Null)

@@ -15,6 +15,9 @@ pub const FORMAT_VERSION: u32 = 3;
 /// First format whose baked bent normal maps are in tangent space
 pub const TANGENT_BENT_NORMAL_VERSION: u32 = 3;
 
+/// Most colour swatches a project keeps
+pub const MAX_SWATCHES: usize = 64;
+
 /// Maximum group nesting (also bounds recursion over hostile project files)
 pub const MAX_DEPTH: usize = 16;
 
@@ -314,6 +317,14 @@ pub struct DisplaySettings {
     pub ior: f32,
     /// Depth of field of the viewport and the path tracer (thin lens).
     pub dof: DepthOfField,
+    /// The selected fill's projection gizmos show in the 3D view (the Projection row's eye)
+    #[serde(skip_serializing_if = "is_shown")]
+    pub projection_gizmos: bool,
+}
+
+/// Whether a view flag is at its default, shown (saved projects then stay as they were)
+fn is_shown(shown: &bool) -> bool {
+    *shown
 }
 
 /// A thin-lens camera's depth of field (Display settings: focus distance and aperture).
@@ -403,6 +414,7 @@ impl Default for DisplaySettings {
             scatter_radius: 0.1,
             ior: 1.5,
             dof: DepthOfField::default(),
+            projection_gizmos: true,
         }
     }
 }
@@ -430,6 +442,9 @@ pub struct Project {
     /// Saved and imported cameras (the viewport's default camera is not in the list).
     #[serde(default)]
     pub cameras: Vec<Camera>,
+    /// The project's colour swatches (linear RGB), in the order they were added; projects without any save none
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub swatches: Vec<[f32; 3]>,
 }
 
 impl Project {
@@ -446,6 +461,7 @@ impl Project {
             next_id: 1,
             display: DisplaySettings::default(),
             cameras: Vec::new(),
+            swatches: Vec::new(),
         }
     }
 
@@ -748,17 +764,23 @@ mod tests {
         let gid = p.alloc_id();
         let g = Layer::new(gid, "g", LayerKind::Group { children: vec![], collapsed: false }, &Channel::DEFAULT_SET);
         p.insert_layer(0, g, Some(a), false).unwrap();
+
         assert_eq!(p.texture_sets[0].stack, vec![a, gid, b]);
+
         p.move_above(b, Some(gid), true).unwrap();
+
         assert_eq!(p.texture_sets[0].stack, vec![a, gid]);
         assert_eq!(p.layer(gid).unwrap().children(), &[b]);
         assert_eq!(p.locate(b), Some((0, Some(gid), 0)));
         assert!(p.move_above(gid, Some(b), true).is_err(), "a group cannot go inside itself");
+
         p.validate().unwrap();
         let removed = p.remove_layer(gid).unwrap();
+
         assert_eq!(removed, vec![gid, b]);
         assert_eq!(p.texture_sets[0].stack, vec![a]);
         assert!(p.layer(b).is_err());
+
         p.validate().unwrap();
     }
 
@@ -816,12 +838,13 @@ mod tests {
         let mut top = paint(&mut p, "y");
         let source = Source::Anchor { anchor, channel: Channel::Height, ramp: Vec::new() };
         top.mask = Some(Mask {
-            effects: vec![Effect::new(p.alloc_id(), EffectKind::Fill { source, projection: Projection::default() })],
+            effects: vec![Effect::new(p.alloc_id(), EffectKind::Fill { source, projection: Projection::default(), sampling: Default::default() })],
             ..Mask::new(MaskBackground::Black)
         });
         p.insert_layer(0, top, Some(id), false).unwrap();
         let json = serde_json::to_string(&p).unwrap();
         let back: Project = serde_json::from_str(&json).unwrap();
+
         assert_eq!(back, p);
         assert_eq!(back.effect(anchor).map(|(owner, _)| owner), Some(id));
 
@@ -831,6 +854,7 @@ mod tests {
             l.as_object_mut().unwrap().remove("content_effects");
         }
         let old: Project = serde_json::from_value(v).unwrap();
+
         assert!(old.layers.values().all(|l| l.content_effects.is_empty()));
     }
 
@@ -842,15 +866,18 @@ mod tests {
         let a = p.insert_layer(0, a, None, false).unwrap();
         let inst = Layer::new(p.alloc_id(), "a", LayerKind::Instance { source: a }, &[]);
         let inst = p.insert_layer(1, inst, None, false).unwrap();
+
         assert_eq!(p.content_layer(inst).map(|l| l.id), Some(a));
         assert_eq!(p.sets_drawing(a), vec![0, 1]);
         assert_eq!(p.sets_drawing(inst), vec![1]);
+
         p.validate().unwrap();
-        // A folder holding an instance of itself draws itself.
+        // A folder holding an instance of itself draws itself
         let gid = p.alloc_id();
         p.insert_layer(1, Layer::new(gid, "g", LayerKind::Group { children: vec![], collapsed: false }, &[]), None, false).unwrap();
         let loop_id = p.alloc_id();
         p.insert_layer(1, Layer::new(loop_id, "g", LayerKind::Instance { source: gid }, &[]), Some(gid), true).unwrap();
+
         assert_eq!(p.instance_cycle(), Some(loop_id));
         assert!(p.validate().is_err());
         assert!(p.content_layer(LayerId(999)).is_none());

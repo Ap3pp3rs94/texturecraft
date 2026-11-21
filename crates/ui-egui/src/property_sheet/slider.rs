@@ -1,12 +1,12 @@
-use super::{PropertySheet, ROW_HIT_HALF_HEIGHT, TEXT_SIZE, track::Track, value_text::ValueText};
-use crate::theme::semibold;
-use egui::{Align2, Id, Rect, Sense, Stroke, WidgetInfo, pos2};
 use std::ops::RangeInclusive;
-pub(super) fn shown_number(value: f32, decimals: usize) -> String {
-    let shown = format!("{value:.decimals$}");
-    let zero = shown.trim_start_matches('-').chars().all(|digit| matches!(digit, '0' | '.'));
-    if zero { shown.trim_start_matches('-').to_owned() } else { shown }
-}
+
+use egui::{Align2, Id, Rect, Sense, Stroke, WidgetInfo, pos2};
+
+use super::number_field::shown_number;
+use super::track::Track;
+use super::value_text::ValueText;
+use super::{PropertySheet, ROW_HIT_HALF_HEIGHT, RowLead, TEXT_SIZE};
+use crate::theme::semibold;
 
 /// Radius of a slider's knob
 pub(super) const KNOB_RADIUS: f32 = 5.0;
@@ -19,6 +19,15 @@ const TRACK_WIDTH: f32 = 2.0;
 
 /// Half the height of a signed slider's zero tick
 const ZERO_TICK_HALF: f32 = 4.0;
+
+/// Radius of an angle row's dial
+const DIAL_RADIUS: f32 = 8.0;
+
+/// The quarter turn back from the screen's 0 rad (pointing right) that points the dial's hand straight up at 0°
+const DIAL_ZERO_DEGREES: f32 = 90.0;
+
+/// Air between the dial and the value, and between the track's end and the dial
+const DIAL_AIR: f32 = 6.0;
 
 /// The numeric value, bounds and display format shared by a slider and its text editor.
 pub(super) struct SliderValue<'a> {
@@ -39,28 +48,79 @@ impl<'a> SliderValue<'a> {
 }
 
 impl PropertySheet<'_> {
+    /// A bounded number; `Some(merge)` when `value` changed, `merge` true for a drag's later steps
     pub(crate) fn slider(&mut self, label: &str, value: &mut f32, range: RangeInclusive<f32>, decimals: usize) -> Option<bool> {
         self.slider_with_suffix(label, value, range, decimals, "")
     }
 
+    /// [`Self::slider`] with a unit after the value ("°", "%")
     pub(crate) fn slider_with_suffix(&mut self, label: &str, value: &mut f32, range: RangeInclusive<f32>, decimals: usize, suffix: &str) -> Option<bool> {
-        let (control, center_y) = self.row(label);
+        self.slider_led(RowLead::label(label), value, range, decimals, suffix)
+    }
+
+    /// [`Self::slider_with_suffix`] led by `lead` (a picture row, a child setting)
+    pub(crate) fn slider_led(&mut self, lead: RowLead<'_>, value: &mut f32, range: RangeInclusive<f32>, decimals: usize, suffix: &str) -> Option<bool> {
+        let (control, center_y) = self.row_with(lead);
         let id = self.next_id();
         let track = Track { start: control.left() + KNOB_RADIUS, end: self.track_end(), center_y, zero: None, ramp: false };
-        let dragged = self.track(id, label, &track, value, &range);
-        let typed = self.value_field(id, label, center_y, SliderValue::new(*value, &range, decimals, suffix));
+        let dragged = self.track(id, lead.text(), &track, value, &range);
+        let typed = self.value_field(id, lead.text(), center_y, SliderValue::new(*value, &range, decimals, suffix));
         Self::apply_typed(value, typed, dragged)
     }
 
+    /// A signed range: fills from zero and marks it with a tick
     pub(crate) fn signed_slider(&mut self, label: &str, value: &mut f32, range: RangeInclusive<f32>, decimals: usize) -> Option<bool> {
+        self.centered_slider(label, value, range, 0.0, decimals)
+    }
+
+    /// A range whose middle `centre` leaves things as they are: fills from it and marks it with a tick, like a signed range
+    pub(crate) fn centered_slider(&mut self, label: &str, value: &mut f32, range: RangeInclusive<f32>, centre: f32, decimals: usize) -> Option<bool> {
         let (control, center_y) = self.row(label);
         let id = self.next_id();
-        let track = Track { start: control.left() + KNOB_RADIUS, end: self.track_end(), center_y, zero: Some(0.0), ramp: false };
+        let track = Track { start: control.left() + KNOB_RADIUS, end: self.track_end(), center_y, zero: Some(centre), ramp: false };
         let dragged = self.track(id, label, &track, value, &range);
         let typed = self.value_field(id, label, center_y, SliderValue::new(*value, &range, decimals, ""));
         Self::apply_typed(value, typed, dragged)
     }
 
+    /// An angle in degrees: the track, then a small dial just before the value
+    pub(crate) fn angle(&mut self, label: &str, degrees: &mut f32, range: RangeInclusive<f32>) -> Option<bool> {
+        self.angle_led(RowLead::label(label), degrees, range)
+    }
+
+    /// [`Self::angle`] led by `lead`
+    pub(crate) fn angle_led(&mut self, lead: RowLead<'_>, degrees: &mut f32, range: RangeInclusive<f32>) -> Option<bool> {
+        self.angle_shown(lead, degrees, range, false)
+    }
+
+    /// [`Self::angle_led`], the value shown with its sign when `plus`
+    fn angle_shown(&mut self, lead: RowLead<'_>, degrees: &mut f32, range: RangeInclusive<f32>, plus: bool) -> Option<bool> {
+        let (control, center_y) = self.row_with(lead);
+        let id = self.next_id();
+        let dial_x = self.right - self.used.value_width.max(super::VALUE_MIN_WIDTH) - DIAL_AIR - DIAL_RADIUS;
+        let track = Track {
+            start: control.left() + KNOB_RADIUS,
+            end: dial_x - DIAL_RADIUS - DIAL_AIR,
+            center_y,
+            zero: (*range.start() < 0.0).then_some(0.0),
+            ramp: false,
+        };
+        let name = lead.text();
+        let dragged = self.track(id, name, &track, degrees, &range);
+
+        let tokens = self.tokens;
+        let painter = self.ui.painter();
+        painter.circle_stroke(pos2(dial_x, center_y), DIAL_RADIUS, Stroke::new(KNOB_STROKE, tokens.button_border));
+        let turn = (*degrees - DIAL_ZERO_DEGREES).to_radians();
+        let hand = pos2(dial_x + DIAL_RADIUS * turn.cos(), center_y + DIAL_RADIUS * turn.sin());
+        painter.line_segment([pos2(dial_x, center_y), hand], Stroke::new(TRACK_WIDTH, tokens.text));
+
+        let shown = if plus { format!("{:+.0}°", *degrees) } else { format!("{:.0}°", *degrees) };
+        let typed = self.column_value_field(id, &name, center_y, &shown, SliderValue::new(*degrees, &range, 0, "°"));
+        Self::apply_typed(degrees, typed, dragged)
+    }
+
+    /// A typed value wins over a drag in the same frame and starts its own undo step
     pub(super) fn apply_typed(value: &mut f32, typed: Option<f32>, dragged: Option<bool>) -> Option<bool> {
         match typed {
             Some(typed) => {
@@ -71,6 +131,7 @@ impl PropertySheet<'_> {
         }
     }
 
+    /// Paints a track with its knob and moves `value` while it is clicked or dragged
     pub(super) fn track(&mut self, id: Id, label: impl std::fmt::Display, track: &Track, value: &mut f32, range: &RangeInclusive<f32>) -> Option<bool> {
         let (minimum, maximum) = (*range.start(), *range.end());
         let span = (maximum - minimum).max(f32::EPSILON);
@@ -114,17 +175,34 @@ impl PropertySheet<'_> {
         edit
     }
 
+    /// The value at the row's end, answering as `label`'s value; a click turns it into a field, which returns the typed value when done
     pub(super) fn value_field(&mut self, id: Id, label: impl std::fmt::Display, center_y: f32, field: SliderValue<'_>) -> Option<f32> {
         let shown = field.shown();
         self.column_value_field(id, &label, center_y, &shown, field)
     }
 
+    /// [`Self::value_field`] reading `shown`: the panel's value column grows to fit it
     pub(super) fn column_value_field(&mut self, id: Id, label: &dyn std::fmt::Display, center_y: f32, shown: &str, field: SliderValue<'_>) -> Option<f32> {
         self.measure_value(shown);
         let width = self.used.value_width.max(super::VALUE_MIN_WIDTH);
         self.value_text_field(id, ValueText { label, right: self.right, width, center_y, shown }, field)
     }
 
+    /// [`Self::value_field`] ending at `right`, `width` wide, outside the panel's value column
+    pub(super) fn value_field_at(
+        &mut self,
+        id: Id,
+        label: impl std::fmt::Display,
+        right: f32,
+        width: f32,
+        center_y: f32,
+        field: SliderValue<'_>,
+    ) -> Option<f32> {
+        let shown = field.shown();
+        self.value_text_field(id, ValueText { label: &label, right, width, center_y, shown: &shown }, field)
+    }
+
+    /// A value drawn as `text.shown` that turns into a field when clicked; returns the typed value (its unit suffix and a leading "×" or "x" allowed), kept in `range`
     fn value_text_field(&mut self, id: Id, value_text: ValueText<'_>, field: SliderValue<'_>) -> Option<f32> {
         let ValueText { label, right, width, center_y, shown } = value_text;
         let SliderValue { value, range, decimals, suffix } = field;
@@ -175,6 +253,7 @@ impl PropertySheet<'_> {
     }
 }
 
+/// `value` kept in `range`; unlike `clamp`, a reversed or NaN range never panics
 pub(super) fn kept_in(value: f32, range: &RangeInclusive<f32>) -> f32 {
     value.max(*range.start()).min(*range.end())
 }

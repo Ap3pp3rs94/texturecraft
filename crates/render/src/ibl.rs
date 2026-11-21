@@ -149,6 +149,14 @@ impl EnvImage {
     /// range, and images larger than [`MAX_IMPORT_WIDTH`] are box-downsampled. None when the
     /// pixel count does not match the size.
     pub fn from_rgba(width: u32, height: u32, rgba: &[[f32; 4]], srgb: bool) -> Option<EnvImage> {
+        Self::from_pixels(width, height, rgba, srgb)
+    }
+
+    pub fn from_linear_rgb(width: u32, height: u32, rgb: &[[f32; 3]]) -> Option<Self> {
+        Self::from_pixels(width, height, rgb, false)
+    }
+
+    fn from_pixels<const N: usize>(width: u32, height: u32, rgba: &[[f32; N]], srgb: bool) -> Option<EnvImage> {
         if width == 0 || height == 0 || rgba.len() as u64 != width as u64 * height as u64 {
             return None;
         }

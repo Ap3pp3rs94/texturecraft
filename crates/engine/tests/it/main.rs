@@ -13,6 +13,10 @@ mod content_effects;
 mod export_colour_space;
 mod export_file_types;
 mod export_maps;
+mod fill_alpha_source;
+mod fill_patterns;
+mod fill_projections;
+mod fill_sampling;
 mod filter_swap;
 mod filters;
 mod frame_selection;
@@ -23,6 +27,7 @@ mod instances;
 mod layer_multi_select;
 mod mask_clone_smudge;
 mod mask_export;
+mod mask_fill_source;
 mod materialcraft_link;
 mod materialx;
 mod materialx_import;
@@ -45,4 +50,8 @@ mod udim;
 mod user_smart_mask;
 mod uv_strokes;
 
+mod fill_whole_material;
+mod swatches;
 mod symmetry;
+
+mod filter_support;

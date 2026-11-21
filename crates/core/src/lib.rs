@@ -7,15 +7,25 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+pub mod backface;
 pub mod bake;
 pub mod blend;
 mod block_scales;
 pub mod channel;
+pub mod cook_resolution;
+pub mod depth_culling;
 mod env_alignment;
+pub mod fill_symmetry;
 pub mod layer;
 pub mod project;
+pub mod projector;
+mod saved_decal;
+mod saved_projection;
 mod shadow_mode;
+pub mod shape_crop;
+pub mod symmetry_kind;
 
+pub use backface::Backface;
 pub use bake::{
     AmbientOcclusionAttenuation, AmbientOcclusionSettings, BackfaceMode, BakeAntialiasing, BakePaintTarget, BakeResolution, BakeSettings, BakedMap,
     BentNormalSettings, CageSettings, CageType, CommonBakeSettings, CurvatureMethod, CurvatureSettings, GroundPlaneSettings, HeightNormalization,
@@ -25,16 +35,22 @@ pub use bake::{
 };
 pub use blend::{BlendMode, blend1, blend3, lum, mix3};
 pub use channel::{Channel, ChannelFormat, ChannelKind};
+pub use cook_resolution::CookResolution;
+pub use depth_culling::DepthCulling;
+pub use fill_symmetry::FillSymmetry;
 pub use layer::{
-    ChannelBlend, CompareOp, CurvatureDetail, CurvatureMode, Decal, DecalFlip, DecalSymmetry, Effect, EffectKind, Fill, Filter, Generator, GeneratorGlobal,
-    GeneratorKind, HeightMask, Layer, LayerId, LayerKind, Levels, LinkParam, LinkPreset, Mask, MaskBackground, MaterialLink, MicroDetail, OutputResolution,
-    PathShape, Procedural, ProceduralKind, Projection, ResolutionMode, Source, TileBlending, TileGenerator, TileInputDistribution, TileShape, TileSizeMode,
-    TileSymmetry, gradient, hsl_adjust, per_unit,
+    ChannelBlend, CompareOp, CurvatureDetail, CurvatureMode, Decal, DecalFlip, DecalSymmetry, Effect, EffectKind, Fill, Filter, Filtering, Generator,
+    GeneratorGlobal, GeneratorKind, HeightMask, Layer, LayerId, LayerKind, Levels, LinkParam, LinkPreset, Mask, MaskBackground, MaterialLink, MicroDetail,
+    OutputResolution, PathShape, Procedural, ProceduralKind, Projection, ResolutionMode, Sampling, ScaleMode, Source, TileBlending, TileGenerator,
+    TileInputDistribution, TileShape, TileSizeMode, TileSymmetry, UvTransform, UvWrap, gradient, hsl_adjust, per_unit,
 };
 pub use project::{
-    AoMixing, BlockScales, Camera, DepthOfField, DisplaySettings, EnvAlignment, FORMAT_VERSION, MAX_RESOLUTION, MIN_RESOLUTION, NormalFormat, NormalMixing,
-    Project, ShadowMode, TANGENT_BENT_NORMAL_VERSION, TextureSet, TileGrid, ToneMapping, UDIM_RANGE, udim_at,
+    AoMixing, BlockScales, Camera, DepthOfField, DisplaySettings, EnvAlignment, FORMAT_VERSION, MAX_RESOLUTION, MAX_SWATCHES, MIN_RESOLUTION, NormalFormat,
+    NormalMixing, Project, ShadowMode, TANGENT_BENT_NORMAL_VERSION, TextureSet, TileGrid, ToneMapping, UDIM_RANGE, udim_at,
 };
+pub use projector::Projector;
+pub use shape_crop::ShapeCrop;
+pub use symmetry_kind::SymmetryKind;
 
 #[derive(Debug, thiserror::Error, Clone, PartialEq)]
 pub enum CoreError {
@@ -52,3 +68,9 @@ pub type Result<T> = std::result::Result<T, CoreError>;
 pub const APP_NAME: &str = "TextureCraft";
 /// Native project file extension.
 pub const PROJECT_EXT: &str = "tcraft";
+
+/// A full turn, in degrees.
+pub const FULL_TURN_DEGREES: f32 = 360.0;
+
+/// Reflectance at normal incidence for a dielectric surface.
+pub const DIELECTRIC_REFLECTANCE: f32 = 0.04;

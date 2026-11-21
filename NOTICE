@@ -12,6 +12,10 @@ Third-party material
 This product bundles third-party material under its own licenses, listed below. The per-file
 list (author, source, license) is in ATTRIBUTION.md.
 
+Studio Small 09 HDR environment (assets/hdr/studio_small_09_512.hdr),
+by Sergej Majboroda (Poly Haven) — CC0-1.0.
+Source: https://polyhaven.com/a/studio_small_09 (1K HDR, reduced to 512x256).
+
 Phosphor Icons (compiled in through the egui-phosphor crate) — MIT.
 egui default fonts (compiled in through the epaint_default_fonts crate): Ubuntu-Light — Ubuntu
 Font Licence 1.0; Hack — MIT and Bitstream Vera License; Noto Emoji — SIL Open Font License 1.1;
