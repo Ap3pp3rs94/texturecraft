@@ -1,7 +1,6 @@
 //! The depth map of a planar or warp projection: the surface nearest its projector across its view, for depth culling
 
-use std::hash::{DefaultHasher, Hash, Hasher};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use texturecraft_core::Projection;
 use texturecraft_geom::Mesh;
@@ -21,62 +20,59 @@ pub struct ProjectorDepth {
     front: Vec<[f32; 3]>,
 }
 
-/// Built maps by their view and the mesh they come from
-type CacheEntry = (ProjectorView, u64, Arc<ProjectorDepth>);
+/// The smallest grid cell across and up, so a flat view still divides
+const MIN_CELL_SIZE: f32 = 1e-6;
 
-static CACHE: Mutex<Vec<CacheEntry>> = Mutex::new(Vec::new());
+/// A cell centre this close outside a triangle's edge (as a share of its area) still counts as inside, so shared edges leave no gaps
+const EDGE_TOLERANCE: f32 = 1e-6;
 
 impl ProjectorDepth {
-    /// The depth map of `proj` over `mesh` within `bounds`, built once per view and mesh; None unless `proj` culls by depth
-    pub fn of(mesh: &Mesh, bounds: (Vec3, Vec3), proj: &Projection) -> Option<Arc<ProjectorDepth>> {
-        let view = ProjectorView::of(proj, bounds)?;
-        let mesh_key = fingerprint(mesh);
-        // Built with the cache locked: the build runs no parallel work, and tiles asking for the same map wait for it instead of building it again
-        let mut cache = CACHE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(at) = cache.iter().position(|(v, m, _)| *v == view && *m == mesh_key) {
-            let entry = cache.remove(at);
-            let depth = entry.2.clone();
-            cache.insert(0, entry);
-            return Some(depth);
-        }
-        let depth = Arc::new(ProjectorDepth::build(view, mesh)?);
-        cache.insert(0, (view, mesh_key, depth.clone()));
-        cache.truncate(CACHE_MAPS);
-        Some(depth)
+    /// Build the depth map of a borrowed mesh, if the projection uses depth culling.
+    pub fn of(mesh: &Mesh, bounds: (Vec3, Vec3), projection: &Projection) -> Option<Arc<ProjectorDepth>> {
+        let view = ProjectorView::of(projection, bounds)?;
+        Self::build(view, mesh).map(Arc::new)
     }
 
     /// Rasterize every triangle of `mesh` in `view`, keeping the nearest per cell (None when no vertex lands in the view)
     pub fn build(view: ProjectorView, mesh: &Mesh) -> Option<ProjectorDepth> {
-        let local: Vec<Option<Vec3>> = mesh.positions.iter().map(|p| view.local(*p)).collect();
-        let (lo, hi) = local.iter().flatten().fold((Vec2::splat(f32::MAX), Vec2::splat(f32::MIN)), |(lo, hi), l| (lo.min(l.truncate()), hi.max(l.truncate())));
-        if lo.x > hi.x || lo.y > hi.y {
+        let projected: Vec<Option<Vec3>> = mesh.positions.iter().map(|position| view.local(*position)).collect();
+        let (min, max) = projected
+            .iter()
+            .flatten()
+            .fold((Vec2::splat(f32::MAX), Vec2::splat(f32::MIN)), |(lo, hi), view_point| (lo.min(view_point.truncate()), hi.max(view_point.truncate())));
+        if min.x > max.x || min.y > max.y {
             return None;
         }
-        let cell = ((hi - lo) / SIZE as f32).max(Vec2::splat(1e-6));
-        let mut depth = ProjectorDepth { view, origin: lo, cell, front: vec![[f32::NEG_INFINITY, 0.0, 0.0]; SIZE * SIZE] };
+
+        let cell = ((max - min) / SIZE as f32).max(Vec2::splat(MIN_CELL_SIZE));
+        let mut depth = ProjectorDepth { view, origin: min, cell, front: vec![[f32::NEG_INFINITY, 0.0, 0.0]; SIZE * SIZE] };
         let mut budget = CELL_BUDGET;
-        for tri in mesh.indices.as_chunks::<3>().0 {
-            let corner = |i: u32| local.get(i as usize).copied().flatten();
-            let (Some(a), Some(b), Some(c)) = (corner(tri[0]), corner(tri[1]), corner(tri[2])) else { continue };
+        for &[first, second, third] in mesh.indices.as_chunks::<3>().0 {
+            let corner = |i: u32| projected.get(i as usize).copied().flatten();
+            let (Some(a), Some(b), Some(c)) = (corner(first), corner(second), corner(third)) else { continue };
             if !depth.raster([a, b, c], &mut budget) {
                 break;
             }
         }
+
         Some(depth)
     }
 
-    /// Keep triangle `t` where it is nearer than what a cell holds; false once the cell budget runs out
-    fn raster(&mut self, t: [Vec3; 3], budget: &mut usize) -> bool {
-        let [a, b, c] = t;
+    /// Keep `triangle` where it is nearer than what a cell holds; false once the cell budget runs out
+    fn raster(&mut self, triangle: [Vec3; 3], budget: &mut usize) -> bool {
+        let [a, b, c] = triangle;
         let (d1, d2) = (b - a, c - a);
-        let det = d1.x * d2.y - d1.y * d2.x;
-        if !det.is_finite() || det.abs() < 1e-12 {
-            // Seen edge on, it covers nothing
+        let determinant = d1.x * d2.y - d1.y * d2.x;
+        if !determinant.is_finite() || determinant.abs() < MIN_SCREEN_AREA {
+            // An edge-on triangle covers no cells
             return true;
         }
-        let slope = Vec2::new((d1.z * d2.y - d2.z * d1.y) / det, (d1.x * d2.z - d2.x * d1.z) / det).clamp(Vec2::splat(-MAX_SLOPE), Vec2::splat(MAX_SLOPE));
-        // Corners in cells: cell (i, j) has its centre at (i + 0.5, j + 0.5)
-        let [pa, pb, pc] = t.map(|p| (p.truncate() - self.origin) / self.cell);
+
+        let slope = Vec2::new((d1.z * d2.y - d2.z * d1.y) / determinant, (d1.x * d2.z - d2.x * d1.z) / determinant)
+            .clamp(Vec2::splat(-MAX_SLOPE), Vec2::splat(MAX_SLOPE));
+
+        // Evaluate coverage at cell centres
+        let [pa, pb, pc] = triangle.map(|corner| (corner.truncate() - self.origin) / self.cell);
         let (lo, hi) = (pa.min(pb).min(pc), pa.max(pb).max(pc));
         let first = |v: f32| (v - 0.5).ceil().clamp(0.0, SIZE as f32) as usize;
         let last = |v: f32| ((v - 0.5).floor() + 1.0).clamp(0.0, SIZE as f32) as usize;
@@ -88,12 +84,15 @@ impl ProjectorDepth {
         let area = edge(pa, pb, pc);
         for y in y0..y1 {
             for x in x0..x1 {
-                let q = Vec2::new(x as f32 + 0.5, y as f32 + 0.5);
-                let inside = [edge(pb, pc, q), edge(pc, pa, q), edge(pa, pb, q)].iter().all(|w| w * area.signum() >= -1e-6 * area.abs());
+                let cell_centre = Vec2::new(x as f32 + 0.5, y as f32 + 0.5);
+                let inside = [edge(pb, pc, cell_centre), edge(pc, pa, cell_centre), edge(pa, pb, cell_centre)]
+                    .iter()
+                    .all(|weight| weight * area.signum() >= -EDGE_TOLERANCE * area.abs());
                 if !inside {
                     continue;
                 }
-                let near = a.z + slope.dot(self.origin + q * self.cell - a.truncate());
+
+                let near = a.z + slope.dot(self.origin + cell_centre * self.cell - a.truncate());
                 if let Some(cell) = self.front.get_mut(y * SIZE + x)
                     && near > cell[0]
                 {
@@ -101,29 +100,39 @@ impl ProjectorDepth {
                 }
             }
         }
+
         true
     }
 
     /// How much depth culling with `hardness` leaves of a projection at world point `p`: 0 behind the surface nearest the projector, 1 on it or where nothing is in front
-    pub fn cover(&self, p: Vec3, hardness: f32) -> f32 {
-        let Some(l) = self.view.local(p) else { return 1.0 };
-        let at = (l.truncate() - self.origin) / self.cell;
+    pub fn cover(&self, position: Vec3, hardness: f32) -> f32 {
+        // Keep the layer visible when a hand-edited hardness is invalid
+        if !hardness.is_finite() {
+            return 1.0;
+        }
+
+        let Some(view_point) = self.view.local(position) else { return 1.0 };
+        let at = (view_point.truncate() - self.origin) / self.cell;
         if !(at.x >= 0.0 && at.y >= 0.0 && at.x < SIZE as f32 && at.y < SIZE as f32) {
             return 1.0;
         }
+
         let (x, y) = (at.x as usize, at.y as usize);
         let Some(&[near, across, up]) = self.front.get(y * SIZE + x).filter(|cell| cell[0].is_finite()) else { return 1.0 };
-        // The nearest surface's plane carried from the cell centre to the point, so a surface is never behind itself
+
+        // Extend the cell's plane to avoid culling a surface against itself
         let centre = self.origin + (Vec2::new(x as f32, y as f32) + 0.5) * self.cell;
         let slope = Vec2::new(across, up);
-        let behind = near + slope.dot(l.truncate() - centre) - l.z;
+        let behind = near + slope.dot(view_point.truncate() - centre) - view_point.z;
         let unit = self.view.unit();
-        // Neighbouring triangles of a curved surface part from the carried plane by about one cell of its slope
+
+        // Add slope bias for curvature across adjacent triangles
         let bias = BIAS * unit + (slope.abs() * self.cell).element_sum().min(MAX_SLOPE_BIAS * unit);
         let width = (1.0 - hardness.clamp(0.0, 1.0)) * FADE * unit;
         if width <= f32::EPSILON {
             return f32::from(u8::from(behind <= bias));
         }
+
         1.0 - smoothstep(bias, bias + width, behind)
     }
 }
@@ -133,21 +142,11 @@ fn edge(a: Vec2, b: Vec2, q: Vec2) -> f32 {
     (b - a).perp_dot(q - a)
 }
 
-/// Which mesh a map was built for: its sizes and a spread of its vertices and indices
-fn fingerprint(mesh: &Mesh) -> u64 {
-    let mut h = DefaultHasher::new();
-    (mesh.positions.len(), mesh.indices.len()).hash(&mut h);
-    for p in mesh.positions.iter().step_by((mesh.positions.len() / FINGERPRINT_SAMPLES).max(1)) {
-        p.to_array().map(f32::to_bits).hash(&mut h);
-    }
-    for i in mesh.indices.iter().step_by((mesh.indices.len() / FINGERPRINT_SAMPLES).max(1)) {
-        i.hash(&mut h);
-    }
-    h.finish()
-}
-
 /// Cells across and up the grid
 const SIZE: usize = 512;
+
+/// A triangle flatter than this on screen is seen edge on
+const MIN_SCREEN_AREA: f32 = 1e-12;
 
 /// Most cells all triangles together may visit before the rest are left out (hostile meshes of huge overlapping triangles)
 const CELL_BUDGET: usize = 256 * SIZE * SIZE;
@@ -163,12 +162,6 @@ const MAX_SLOPE_BIAS: f32 = 0.05;
 
 /// How far behind the nearest surface culling fades out at hardness 0, in mesh radii
 const FADE: f32 = 0.1;
-
-/// Maps kept built (each is about 3 MB)
-const CACHE_MAPS: usize = 8;
-
-/// Vertices and indices the mesh fingerprint reads
-const FINGERPRINT_SAMPLES: usize = 64;
 
 #[cfg(test)]
 mod tests {
@@ -208,6 +201,36 @@ mod tests {
         let soft = depth.cover(Vec3::new(0.5, 0.3, 0.5 - 0.01), 0.0);
         assert!(soft > 0.0 && soft < 1.0, "a soft cull fades just behind the front: {soft}");
         assert!(ProjectorView::of(&planar_z(false, 1.0), bounds).is_none(), "off, there is nothing to build");
+    }
+
+    #[test]
+    fn a_nan_hardness_culls_nothing() {
+        let mesh = two_squares(0.5, -0.5);
+        let depth = ProjectorDepth::build(ProjectorView::of(&planar_z(true, 1.0), mesh.bounds()).unwrap(), &mesh).unwrap();
+
+        let behind = depth.cover(Vec3::new(0.5, 0.3, -0.5), f32::NAN);
+
+        assert_eq!(behind, 1.0, "a hand-edited NaN hardness keeps the back square visible");
+    }
+
+    #[test]
+    fn interleaved_meshes_keep_their_own_projector_depth() {
+        let mut mesh = two_squares(0.5, -0.5);
+        // Add enough unused vertices for the old sample to skip the changed edge
+        mesh.positions.resize(200, Vec3::ZERO);
+        let mut edited = mesh.clone();
+        for right in [1, 2] {
+            edited.positions[right].x = 0.5;
+        }
+        assert_eq!(mesh.bounds(), edited.bounds());
+
+        let proj = planar_z(true, 1.0);
+        let behind_the_cut = Vec3::new(0.75, 0.3, -0.5);
+        let bounds = mesh.bounds();
+        assert_eq!(ProjectorDepth::of(&mesh, bounds, &proj).unwrap().cover(behind_the_cut, 1.0), 0.0);
+
+        let rebuilt = ProjectorDepth::of(&edited, bounds, &proj).unwrap();
+        assert_eq!(rebuilt.cover(behind_the_cut, 1.0), 1.0, "nothing is in front there any more");
     }
 
     #[test]

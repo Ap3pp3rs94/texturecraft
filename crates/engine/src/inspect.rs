@@ -11,20 +11,20 @@ fn source_json(source: &Source) -> Value {
     match source {
         Source::Uniform(value) => json!({ "uniform": value }),
         Source::Procedural { pattern, low, high, ramp } => {
-            let mut report = json!({
+            let mut out = json!({
                 "procedural": pattern.kind.label(), "scale": pattern.scale, "seed": pattern.seed, "contrast": pattern.contrast,
                 "balance": pattern.balance, "invert": pattern.invert, "low": low, "high": high
             });
 
             if !pattern.resolution.is_default() {
-                report["resolution"] =
+                out["resolution"] =
                     json!({ "mode": format!("{:?}", pattern.resolution.mode), "custom": pattern.resolution.custom, "factor": pattern.resolution.factor });
             }
             if let Some(tile) = &pattern.tile {
-                report["tile"] = crate::procedural_params::tile_report(tile);
+                out["tile"] = crate::procedural_params::tile_report(tile);
             }
 
-            with_ramp(report, ramp)
+            with_ramp(out, ramp)
         }
         Source::Image { name, normal_format: NormalFormat::OpenGl } => json!({ "image": name }),
         Source::Image { name, normal_format: NormalFormat::DirectX } => json!({ "image": name, "normalFormat": "directX" }),
@@ -32,12 +32,12 @@ fn source_json(source: &Source) -> Value {
     }
 }
 
-/// `v` with the gradient map stops of its source as `colors`, when it has any.
-fn with_ramp(mut v: Value, ramp: &[[f32; 3]]) -> Value {
+/// `out` with the gradient map stops of its source as `colors`, when it has any
+fn with_ramp(mut out: Value, ramp: &[[f32; 3]]) -> Value {
     if !ramp.is_empty() {
-        v["colors"] = json!(ramp);
+        out["colors"] = json!(ramp);
     }
-    v
+    out
 }
 
 fn fill_json(fill: &Fill) -> Value {
@@ -66,18 +66,48 @@ fn placement_json(projection: &Projection, sampling: &Sampling, out: &mut Value)
     }
 }
 
-/// A mask or content (`content`) effect.
+/// A mask or content (`content`) effect
 fn effect_json(session: &Session, effect: &Effect, content: bool) -> Value {
     let mut out = json!({ "id": effect.id.0, "name": effect.name, "kind": effect.kind.name(), "visible": effect.visible, "blend": effect.blend.label(), "opacity": effect.opacity });
+    if !effect.channel_blends.is_empty() {
+        let channels =
+            effect.channel_blends.iter().map(|(channel, blend)| (channel.id().to_string(), json!({ "blend": blend.mode.label(), "opacity": blend.opacity })));
+        out["channelBlends"] = Value::Object(channels.collect());
+    }
+    if !effect.off_channels.is_empty() {
+        out["offChannels"] = json!(effect.off_channels.iter().map(|channel| channel.id()).collect::<Vec<_>>());
+    }
+    if !effect.inputs.is_empty() {
+        out["inputs"] = Value::Object(effect.inputs.iter().map(|(id, source)| (id.clone(), source_json(source))).collect());
+    }
     let mask_tiles = || session.doc.pixels.masks.get(&effect.id).map_or(0, |image| image.allocated_count());
     let content_tiles = || session.doc.pixels.layers.iter().filter(|((id, _), _)| *id == effect.id).map(|(_, image)| image.allocated_count()).sum::<usize>();
 
     match &effect.kind {
         EffectKind::Generator(generator) => out["generator"] = generator_json(generator),
-        EffectKind::Levels(levels) => out["levels"] = json!([levels.in_low, levels.in_high, levels.gamma, levels.out_low, levels.out_high]),
-        EffectKind::ColorSelection { colors, tolerance } => {
-            out["colors"] = json!(colors);
-            out["tolerance"] = json!(tolerance);
+        EffectKind::Levels(levels) => {
+            out["levels"] = json!([levels.in_low, levels.in_high, levels.gamma, levels.out_low, levels.out_high]);
+            out["affects"] = levels.affects.map_or(json!("all"), |channel| json!(channel.id()));
+            out["clamp"] = json!(levels.clamp);
+        }
+        EffectKind::ColorSelection(selection) => {
+            out["colors"] = json!(selection.colors);
+            out["tolerance"] = json!(selection.tolerance);
+            out["output"] = json!(selection.output);
+            out["hardness"] = json!(selection.hardness);
+            out["background"] = json!(selection.background.id());
+            out["idMap"] = json!(selection.id_map);
+        }
+        EffectKind::Compare { op, value, tolerance, left, right, channel, hardness } => {
+            out["compare"] = json!({
+                "left": left.id(),
+                "op": op.id(),
+                "right": right.id(),
+                "compareChannel": channel.id(),
+                "value": value,
+                "tolerance": tolerance,
+                "hardness": hardness,
+            });
         }
         EffectKind::Path(paths) => {
             out["paths"] = json!(
@@ -95,17 +125,25 @@ fn effect_json(session: &Session, effect: &Effect, content: bool) -> Value {
         EffectKind::Filter(filter) => {
             out["filter"] = json!(filter);
             match filter {
-                Filter::Hsl { hue, saturation, lightness } => out["hsl"] = json!([hue, saturation, lightness]),
-                Filter::Blur { radius } => out["radius"] = json!(radius),
+                Filter::Hsl { hue, saturation, lightness, .. } => out["hsl"] = json!([hue, saturation, lightness]),
+                Filter::Blur { radius, .. } => out["radius"] = json!(radius),
                 _ => {}
             }
         }
-        _ => {}
+        EffectKind::Anchor => {
+            let readers = session
+                .doc
+                .project
+                .anchor_readers(effect.id)
+                .into_iter()
+                .map(|(layer, reader)| json!({ "layer": layer.0, "effect": reader.map(|reader| reader.0) }));
+            out["references"] = Value::Array(readers.collect());
+        }
     }
     out
 }
 
-/// A generator's settings: global adjustments, then its resolution, replaced inputs and curvature detail when it has them.
+/// A generator's settings: global adjustments, then its resolution, replaced inputs and curvature detail when it has them
 fn generator_json(generator: &Generator) -> Value {
     let mut out = json!({ "type": format!("{:?}", generator.kind), "level": generator.level, "softness": generator.softness, "noise": generator.noise_amount, "offset": generator.offset, "invert": generator.invert, "blur": generator.global.blur, "balance": generator.global.balance, "contrast": generator.global.contrast });
     if !generator.resolution.is_default() {
@@ -167,6 +205,11 @@ fn layer_json(s: &Session, l: &Layer, depth: usize) -> Value {
     if !l.content_effects.is_empty() {
         v["contentEffects"] = json!(l.content_effects.iter().map(|e| effect_json(s, e, true)).collect::<Vec<_>>());
     }
+    if let LayerKind::Group { contents, .. } = &l.kind
+        && !contents.is_none()
+    {
+        v["contents"] = json!({ "scale": contents.scale, "rotation": contents.rotation });
+    }
     if depth < texturecraft_core::project::MAX_DEPTH {
         let kids: Vec<Value> = l.children().iter().rev().filter_map(|c| s.doc.project.layers.get(c)).map(|c| layer_json(s, c, depth + 1)).collect();
         if l.is_group() {
@@ -176,7 +219,7 @@ fn layer_json(s: &Session, l: &Layer, depth: usize) -> Value {
     v
 }
 
-/// The layer stack of texture set `ts`, top → bottom (as displayed).
+/// The layer stack of texture set `ts`, top → bottom (as displayed)
 pub fn stack(s: &Session, ts: usize) -> Value {
     let Some(set) = s.doc.project.texture_sets.get(ts) else { return Value::Null };
     json!(set.stack.iter().rev().filter_map(|id| s.doc.project.layers.get(id)).map(|l| layer_json(s, l, 0)).collect::<Vec<_>>())
@@ -217,7 +260,7 @@ pub fn texture_set(session: &Session, index: usize) -> Value {
     })
 }
 
-/// The whole session.
+/// The whole session
 pub fn session(session: &Session) -> Value {
     let texture_set = session.ts();
     json!({

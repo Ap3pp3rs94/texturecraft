@@ -59,7 +59,22 @@ fn screens() -> Vec<(&'static str, Harness<'static, TextureCraftApp>)> {
                 execute(session, "layer.add.fill", &json!({})).unwrap();
             }),
         ),
+        (
+            "folder",
+            screen(|session| {
+                let folder = execute(session, "layer.add.group", &json!({})).unwrap()["layer"].clone();
+                execute(session, "layer.select", &json!({"layer": folder, "target": "content"})).unwrap();
+            }),
+        ),
         ("mask fill", screen(|session| with_effect(session, "mask", "effect.add.fill", json!({})))),
+        ("mask paint", screen(|session| with_effect(session, "mask", "effect.add.paint", json!({})))),
+        ("colour selection", screen(|session| with_effect(session, "mask", "effect.add.colorSelection", json!({})))),
+        ("compare mask", screen(|session| with_effect(session, "mask", "effect.add.compare", json!({})))),
+        ("levels", screen(|session| with_effect(session, "content", "effect.add.levels", json!({})))),
+        ("generator", screen(|session| with_effect(session, "mask", "effect.add.generator", json!({"generator": "curvature"})))),
+        ("blur filter", screen(|session| with_effect(session, "content", "effect.add.filter", json!({"filter": "blur"})))),
+        ("gradient filter", screen(|session| with_effect(session, "content", "effect.add.filter", json!({"filter": "gradient"})))),
+        ("warp filter", screen(|session| with_effect(session, "mask", "effect.add.filter", json!({"filter": "warp"})))),
     ]
 }
 

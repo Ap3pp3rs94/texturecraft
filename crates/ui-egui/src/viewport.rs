@@ -49,7 +49,7 @@ pub fn set_focus_picking(ctx: &egui::Context, on: bool) {
 fn aux_view(app: &TextureCraftApp) -> Option<crate::gpu::AuxView> {
     match (app.session.view, app.picking_id_color) {
         _ if quick_mask_shown(app) => Some(crate::gpu::AuxView::QuickMask),
-
+        (ViewMode::MeshMap(BakedMap::Id), Some(pick)) => Some(crate::gpu::AuxView::IdMask(pick.effect)),
         (ViewMode::MeshMap(map), _) => Some(crate::gpu::AuxView::MeshMap(map)),
         (ViewMode::Mask(id), _) => Some(crate::gpu::AuxView::Mask(id)),
         (ViewMode::Image, _) => Some(crate::gpu::AuxView::Image),
@@ -2687,7 +2687,7 @@ mod tests {
 
         crate::id_color_pick::IdColorPick::start(harness.state_mut(), effect, None);
 
-        assert_eq!(aux_view(harness.state()), Some(crate::gpu::AuxView::MeshMap(BakedMap::Id)), "the ID mesh map");
+        assert_eq!(aux_view(harness.state()), Some(crate::gpu::AuxView::IdMask(effect)), "the pick's own ID mask");
 
         crate::id_color_pick::IdColorPick::end(harness.state_mut());
 

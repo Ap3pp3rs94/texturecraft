@@ -1,8 +1,8 @@
 //! MaterialCraft materials as fill layers. A `.mcmat` portable material becomes a fill whose
 //! channel sources are its cooked maps (image resources) and whose [`MaterialLink`] keeps the
 //! graph's exposed parameters. Changing one re-cooks the maps through `materialcraft-cli` at the
-//! texture set's resolution, with the set's baked mesh maps feeding graph inputs of the same name.
-//! Both apps use the shared craft-mcmat container and the public CLI.
+//! layer's picked resolution (default: the texture set's), with the set's baked mesh maps feeding graph inputs of the same name;
+//! both apps use the shared craft-mcmat container and the public CLI
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -62,7 +62,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Re-cook MaterialCraft material",
             [],
             None,
-            "{layer?} — re-cooks a MaterialCraft material layer at its texture set's resolution with the set's baked mesh maps",
+            "{layer?} — re-cooks a MaterialCraft material layer at its picked resolution (default: the texture set's) with the set's baked mesh maps",
             has_layer,
             |s, p| {
                 let id = layer_param(s, "material.link.cook", p)?;
@@ -100,9 +100,9 @@ pub fn specs() -> Vec<CommandSpec> {
 }
 
 /// The link of fill layer `id`.
-fn link_of(session: &Session, cmd: &str, id: LayerId) -> Result<MaterialLink> {
+fn link_of<'a>(session: &'a Session, cmd: &str, id: LayerId) -> Result<&'a MaterialLink> {
     match &session.doc.project.layer(id)?.kind {
-        LayerKind::Fill(Fill { link: Some(link), .. }) => Ok(link.as_ref().clone()),
+        LayerKind::Fill(Fill { link: Some(link), .. }) => Ok(link.as_ref()),
         _ => Err(bad(cmd, format!("layer {} is not a MaterialCraft material", id.0))),
     }
 }
@@ -183,17 +183,18 @@ fn preset(s: &mut Session, p: &Value) -> Result<Value> {
     let id = layer_param(s, CMD, p)?;
     let name = strp(p, "name").ok_or_else(|| bad(CMD, "`name` is required"))?;
     let link = link_of(s, CMD, id)?;
-    let values = link.presets.iter().find(|pr| pr.name == name).ok_or_else(|| bad(CMD, format!("`{}` has no preset `{name}`", link.name)))?.values.clone();
+    let preset = link.presets.iter().find(|preset| preset.name == name).ok_or_else(|| bad(CMD, format!("`{}` has no preset `{name}`", link.name)))?;
 
     // Leave values the painter cannot set unchanged
-    let values = values.into_iter().filter(|(k, _)| link.params.iter().any(|p| p.id == *k));
+    let values =
+        preset.values.iter().filter(|(key, _)| link.params.iter().any(|param| &param.id == *key)).map(|(key, value)| (key.clone(), value.clone())).collect();
     update(s, CMD, id, values, boolp(p, "cook").unwrap_or(true))
 }
 
 /// Set parameter values of linked layer `id`; with `cook`, re-cook now (one undo step).
-fn update(s: &mut Session, cmd: &str, id: LayerId, overrides: impl IntoIterator<Item = (String, Value)>, cook_now: bool) -> Result<Value> {
+fn update(s: &mut Session, cmd: &str, id: LayerId, overrides: Map<String, Value>, cook_now: bool) -> Result<Value> {
     let link = link_of(s, cmd, id)?;
-    let values = checked(cmd, &link, &overrides.into_iter().collect::<Map<_, _>>())?;
+    let values = checked(cmd, link, &overrides)?;
     if cook_now {
         return cook(s, id, values);
     }
@@ -232,7 +233,8 @@ fn map(s: &mut Session, p: &Value) -> Result<Value> {
             } else {
                 link.mapping.insert(channel, output.to_string());
             }
-            // Sources no longer name every output once one is mapped elsewhere.
+
+            // Sources no longer name every output once one is mapped elsewhere
             link.outputs = outputs;
         }
         Ok(())
@@ -242,13 +244,15 @@ fn map(s: &mut Session, p: &Value) -> Result<Value> {
 
 /// The `relative` or `fixed` param of `material.link.resolution`; `Some(None)` is the texture set's own size
 pub(crate) fn picked_resolution(p: &Value) -> Option<Option<CookResolution>> {
-    let integer = |key: &str| p.get(key).and_then(Value::as_i64);
-    match (integer("relative"), integer("fixed")) {
+    match (p.get("relative"), p.get("fixed")) {
         (Some(factor), None) => {
-            let factor = i8::try_from(factor).ok().filter(|factor| CookResolution::FACTORS.contains(factor))?;
+            let factor = i8::try_from(factor.as_i64()?).ok().filter(|factor| CookResolution::FACTORS.contains(factor))?;
             Some((factor != 0).then_some(CookResolution::Relative(factor)))
         }
-        (None, Some(size)) => u32::try_from(size).ok().filter(|size| CookResolution::cookable(*size)).map(|size| Some(CookResolution::Fixed(size))),
+        (None, Some(size)) => {
+            let size = u32::try_from(size.as_i64()?).ok().filter(|size| CookResolution::cookable(*size))?;
+            Some(Some(CookResolution::Fixed(size)))
+        }
         _ => None,
     }
 }
@@ -257,7 +261,7 @@ fn resolution(s: &mut Session, p: &Value) -> Result<Value> {
     const CMD: &str = "material.link.resolution";
     let id = layer_param(s, CMD, p)?;
     let size = picked_resolution(p).ok_or_else(|| bad(CMD, "give `relative` (-3..3) or `fixed` (a power of two from 128 to 8192)"))?;
-    link_of(s, CMD, id)?;
+    let link = link_of(s, CMD, id)?;
     let store = |s: &mut Session| {
         s.edit(EDIT, |s| {
             if let LayerKind::Fill(Fill { link: Some(link), .. }) = &mut s.doc.project.layer_mut(id)?.kind {
@@ -267,16 +271,20 @@ fn resolution(s: &mut Session, p: &Value) -> Result<Value> {
         })
     };
     if !boolp(p, "cook").unwrap_or(true) {
-        store(s)?;
+        // Only the stored size changes, so the size it already has adds no undo step
+        if link.resolution != size {
+            store(s)?;
+        }
+
         return Ok(json!({"layer": id.0, "cooked": false}));
     }
-    // Cook first so a failed cook changes nothing, then store and swap the maps as one step.
+
+    // Install the resolution and maps in one edit so a failed install also leaves the old resolution
     let mut job = s.link_job(id, &Map::new())?;
     let (texture_set, _, _) = s.doc.project.locate(id).ok_or_else(|| bad(CMD, format!("layer {} is not in a stack", id.0)))?;
     job.size = size.unwrap_or(CookResolution::TEXTURE_SET).size(s.doc.project.texture_set(texture_set)?.resolution);
     let material = job.run()?;
-    store(s)?;
-    s.apply_link_cook(id, &material, true)?;
+    s.install_link_cook(id, &material, s.merge_edits, Some(size))?;
     Ok(json!({"layer": id.0, "cooked": true, "size": job.size}))
 }
 
@@ -513,7 +521,7 @@ impl Session {
 
         let mut images = std::collections::HashSet::new();
         for image in self.images.values().filter(|image| images.insert(Arc::as_ptr(image))) {
-            retained_bytes = retained_bytes.saturating_add(image.rgba.capacity() as u64 * std::mem::size_of::<[f32; 4]>() as u64);
+            retained_bytes = retained_bytes.saturating_add(image_texel_bytes(image));
         }
 
         budget.set_retained(retained_bytes);
@@ -545,14 +553,14 @@ impl Session {
             graph: Some(link.graph.clone()),
             size: self.link_size(id)?,
             values,
-            input_identifiers: link.inputs,
+            input_identifiers: link.inputs.clone(),
             baked: self.doc.baked.get(&texture_set).cloned(),
             budget: self.link_memory_budget(),
             canceled: Arc::default(),
         })
     }
 
-    /// Pixels across linked layer `id` cooks at: its picked resolution, else its texture set's.
+    /// Pixels across linked layer `id` cooks at: its picked resolution, else its texture set's
     pub fn link_size(&self, id: LayerId) -> Result<u32> {
         let link = link_of(self, "material.link", id)?;
         let (texture_set, _, _) = self.doc.project.locate(id).ok_or_else(|| EngineError::Other(format!("layer {} is not in a stack", id.0)))?;
@@ -564,6 +572,10 @@ impl Session {
     /// With `merge`, this folds into the previous undo step when that was an edit of the same kind
     /// (a parameter set while the cook ran).
     pub fn apply_link_cook(&mut self, id: LayerId, material: &CookedMaterial, merge: bool) -> Result<()> {
+        self.install_link_cook(id, material, merge, None)
+    }
+
+    fn install_link_cook(&mut self, id: LayerId, material: &CookedMaterial, merge: bool, resolution_change: Option<Option<CookResolution>>) -> Result<()> {
         self.link_memory_budget().check(material_bytes(material))?;
         let names = self.edit_merging(EDIT, merge, |session| {
             let LayerKind::Fill(mut fill) = session.doc.project.layer(id)?.kind.clone() else {
@@ -571,6 +583,10 @@ impl Session {
             };
 
             let link = fill.link.as_mut().ok_or_else(|| EngineError::Other(format!("layer {} is not a MaterialCraft material", id.0)))?;
+            if let Some(resolution) = resolution_change {
+                link.resolution = resolution;
+            }
+
             for parameter in &mut link.params {
                 if let Some(cooked) = material.interface.parameters.iter().find(|candidate| candidate.id == parameter.id) {
                     parameter.value = cooked.value.clone();
@@ -615,9 +631,13 @@ impl Session {
 }
 
 fn material_bytes(material: &CookedMaterial) -> u64 {
-    material.maps.iter().fold(0u64, |total, map| {
-        total.saturating_add(map.bytes.capacity() as u64).saturating_add(map.image.rgba.capacity() as u64 * std::mem::size_of::<[f32; 4]>() as u64)
-    })
+    material.maps.iter().fold(0u64, |total, map| total.saturating_add(map.bytes.capacity() as u64).saturating_add(image_texel_bytes(&map.image)))
+}
+
+fn image_texel_bytes(image: &texturecraft_compose::ImageRes) -> u64 {
+    let texel_bytes = |capacity: usize| (capacity as u64).saturating_mul(std::mem::size_of::<[f32; 4]>() as u64);
+    let full_image = texel_bytes(image.rgba.capacity());
+    image.mips.get().into_iter().flatten().fold(full_image, |bytes, mip| bytes.saturating_add(texel_bytes(mip.rgba.capacity())))
 }
 
 /// A resource name that preserves its suffix through a project round trip.
@@ -635,9 +655,7 @@ fn unique(session: &Session, stem: &str, suffix: &str) -> String {
     format!("{stem}{suffix}")
 }
 
-/// Store `maps` as new resources (names carry a fresh id, so the decoded-image cache never
-/// confuses two cooks), list them as the link's outputs and point `fill`'s channels at them: each
-/// channel at its mapped output, else at the output named like it. Returns the names, in map order.
+/// Store `maps` as new resources (names carry a fresh id, so the decoded-image cache never confuses two cooks), list them as the link's outputs and point `fill`'s channels at them: each channel at its mapped output, else at the output named like it. Returns the names, in map order
 fn put_maps(s: &mut Session, stem: &str, maps: &[CookedMap], fill: &mut Fill) -> Vec<String> {
     let cook = s.doc.project.alloc_id().0;
     let mut names = Vec::new();
@@ -650,12 +668,14 @@ fn put_maps(s: &mut Session, stem: &str, maps: &[CookedMap], fill: &mut Fill) ->
         outputs.insert(channel.id().to_string(), name.clone());
         names.push(name);
     }
+
+    // Both callers cook a linked fill; one without a link only keeps the stored maps
     let Some(link) = fill.link.as_mut() else { return names };
     let channels: BTreeSet<Channel> = maps.iter().map(|map| map.channel).chain(link.mapping.keys().copied()).collect();
     for channel in channels {
         let Some(name) = outputs.get(link.output_of(channel)) else { continue };
 
-        // Preserve a normal convention the user chose for this layer
+        // A normal map the user marked DirectX stays marked through re-cooks
         let normal_format = match fill.sources.get(&channel) {
             Some(Source::Image { normal_format, .. }) => *normal_format,
             _ => Default::default(),

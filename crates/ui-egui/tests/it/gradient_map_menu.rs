@@ -6,6 +6,8 @@ use serde_json::json;
 use texturecraft_engine::core::{Channel, LayerId, LayerKind};
 use texturecraft_ui_egui::TextureCraftApp;
 
+/// The Base color channel's name in Properties (the rightmost "Base color" label).
+
 /// Opens the Base color source menu and clicks its Gradient Map item.
 fn click_gradient_map(h: &mut Harness<'_, TextureCraftApp>) {
     let menu = h.get_by_label("Channel options");

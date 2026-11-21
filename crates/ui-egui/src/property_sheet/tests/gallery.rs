@@ -21,7 +21,7 @@ pub(super) struct Gallery {
     pub(super) channels: [bool; 5],
     pub(super) channel_value: f32,
     pub(super) intensity: f32,
-
+    pub(super) divider: &'static str,
     pub(super) seed: u32,
     pub(super) randomized: u32,
     pub(super) long_choice: usize,
@@ -47,7 +47,7 @@ impl Default for Gallery {
             channels: [true, true, true, false, true],
             channel_value: 0.8,
             intensity: 0.5,
-
+            divider: "1",
             seed: 1234,
             randomized: 0,
             long_choice: 0,
