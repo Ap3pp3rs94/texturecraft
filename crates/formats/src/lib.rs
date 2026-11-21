@@ -152,12 +152,22 @@ pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
     write_batch_atomic([(path, bytes)])
 }
 
-/// Write every `(path, bytes)` pair atomically: stage and sync all temporary files first (excluding
-/// all batch targets), and only then rename them into place with backup/rollback recovery if any
-/// rename fails. On any failure, no new or modified target files remain.
+/// Write every `(path, bytes)` pair by staging and syncing all temporary files first (excluding
+/// all batch targets), then renaming them into place one at a time. Concurrent readers can briefly
+/// observe a mixed generation during the rename loop. Single-file batches rename directly without
+/// creating a backup. For multi-file batches, if a later rename fails, earlier publications are
+/// rolled back (restoring backups for overwritten targets and removing newly created targets), or
+/// an explicit error is returned naming any incomplete rollback paths.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn write_batch_atomic<'a>(entries: impl IntoIterator<Item = (&'a std::path::Path, &'a [u8])>) -> Result<()> {
     write_batch_atomic_with_hook(entries, |_, _| Ok(()))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+enum RollbackBackup {
+    File(std::path::PathBuf),
+    #[cfg(unix)]
+    Symlink(std::path::PathBuf),
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -168,6 +178,9 @@ fn write_batch_atomic_with_hook<'a>(
     use std::io::Write;
 
     let entries: Vec<(&std::path::Path, &[u8])> = entries.into_iter().collect();
+    if entries.is_empty() {
+        return Ok(());
+    }
     let mut reserved: std::collections::HashSet<std::path::PathBuf> = entries.iter().map(|(path, _)| path.to_path_buf()).collect();
     let mut staged: Vec<(std::path::PathBuf, &std::path::Path)> = Vec::with_capacity(entries.len());
     let cleanup_staged = |staged: &[(std::path::PathBuf, &std::path::Path)]| {
@@ -199,19 +212,40 @@ fn write_batch_atomic_with_hook<'a>(
         staged.push((temporary_path, path));
     }
 
-    let mut published: Vec<(&std::path::Path, Option<std::path::PathBuf>)> = Vec::with_capacity(staged.len());
-    let rollback = |published: &mut Vec<(&std::path::Path, Option<std::path::PathBuf>)>,
+    // Single-file writes have no earlier publications to roll back, so rename directly.
+    if staged.len() == 1 {
+        let (ref temporary_path, target_path) = staged[0];
+        if let Err(error) = before_rename(0, target_path).and_then(|()| std::fs::rename(temporary_path, target_path)) {
+            let _ = std::fs::remove_file(temporary_path);
+            return Err(error.into());
+        }
+        return Ok(());
+    }
+
+    let mut published: Vec<(&std::path::Path, Option<RollbackBackup>)> = Vec::with_capacity(staged.len());
+    let rollback = |published: &mut Vec<(&std::path::Path, Option<RollbackBackup>)>,
                     remaining: &[(std::path::PathBuf, &std::path::Path)],
                     cause: std::io::Error|
      -> FormatError {
         let mut incomplete = Vec::new();
-        for (target_path, backup_path) in published.drain(..).rev() {
-            if let Some(backup) = backup_path {
-                if let Err(err) = std::fs::rename(&backup, target_path) {
-                    incomplete.push(format!("{} (backup at {}): {err}", target_path.display(), backup.display()));
+        for (target_path, backup) in published.drain(..).rev() {
+            match backup {
+                Some(RollbackBackup::File(backup_path)) => {
+                    if let Err(err) = std::fs::rename(&backup_path, target_path) {
+                        incomplete.push(format!("{} (backup at {}): {err}", target_path.display(), backup_path.display()));
+                    }
                 }
-            } else if let Err(err) = std::fs::remove_file(target_path) {
-                incomplete.push(format!("{}: {err}", target_path.display()));
+                #[cfg(unix)]
+                Some(RollbackBackup::Symlink(link_target)) => {
+                    if let Err(err) = std::fs::remove_file(target_path).and_then(|()| std::os::unix::fs::symlink(&link_target, target_path)) {
+                        incomplete.push(format!("{} (symlink -> {}): {err}", target_path.display(), link_target.display()));
+                    }
+                }
+                None => {
+                    if let Err(err) = std::fs::remove_file(target_path) {
+                        incomplete.push(format!("{}: {err}", target_path.display()));
+                    }
+                }
             }
         }
         cleanup_staged(remaining);
@@ -227,65 +261,76 @@ fn write_batch_atomic_with_hook<'a>(
         if let Err(error) = before_rename(index, target_path) {
             return Err(rollback(&mut published, &staged[index..], error));
         }
-        let backup_path = if std::fs::symlink_metadata(target_path).is_ok() {
-            let (backup, backup_file) = match create_temp_excluding(target_path, &reserved) {
-                Ok(pair) => pair,
-                Err(error) => {
-                    let cause = std::io::Error::other(error.to_string());
-                    return Err(rollback(&mut published, &staged[index..], cause));
+        let backup = match std::fs::symlink_metadata(target_path) {
+            Ok(meta) => {
+                #[cfg(unix)]
+                if meta.file_type().is_symlink() {
+                    match std::fs::read_link(target_path) {
+                        Ok(link_target) => Some(RollbackBackup::Symlink(link_target)),
+                        Err(error) => return Err(rollback(&mut published, &staged[index..], error)),
+                    }
+                } else {
+                    match stage_file_backup(target_path, &meta, &mut reserved) {
+                        Ok(path) => Some(RollbackBackup::File(path)),
+                        Err(error) => return Err(rollback(&mut published, &staged[index..], error)),
+                    }
                 }
-            };
-            drop(backup_file);
-            reserved.insert(backup.clone());
-            // Copy to backup so `target_path` stays intact until `rename` atomically replaces it.
-            if let Err(error) = std::fs::copy(target_path, &backup) {
-                let _ = std::fs::remove_file(&backup);
-                return Err(rollback(&mut published, &staged[index..], error));
+                #[cfg(not(unix))]
+                {
+                    match stage_file_backup(target_path, &meta, &mut reserved) {
+                        Ok(path) => Some(RollbackBackup::File(path)),
+                        Err(error) => return Err(rollback(&mut published, &staged[index..], error)),
+                    }
+                }
             }
-            Some(backup)
-        } else {
-            None
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(rollback(&mut published, &staged[index..], error)),
         };
+
         if let Err(error) = std::fs::rename(&staged[index].0, target_path) {
-            if let Some(backup) = backup_path {
-                let _ = std::fs::remove_file(&backup);
+            if let Some(RollbackBackup::File(ref backup_path)) = backup {
+                let _ = std::fs::remove_file(backup_path);
             }
             return Err(rollback(&mut published, &staged[index..], error));
         }
-        published.push((target_path, backup_path));
+        published.push((target_path, backup));
     }
 
-    for (_, backup_path) in published {
-        if let Some(backup) = backup_path {
-            let _ = std::fs::remove_file(backup);
+    for (_, backup) in published {
+        if let Some(RollbackBackup::File(backup_path)) = backup {
+            let _ = std::fs::remove_file(backup_path);
         }
     }
 
     Ok(())
 }
 
-#[cfg(all(test, unix))]
-mod atomic_tests {
-    use super::{write_atomic, write_batch_atomic, write_batch_atomic_with_hook};
-
-    #[test]
-    fn write_atomic_does_not_follow_a_planted_temp_symlink() -> std::io::Result<()> {
-        let directory = std::env::temp_dir().join(format!("tc-atomic-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&directory);
-        std::fs::create_dir_all(&directory)?;
-        let target = directory.join("out.png");
-        let victim = directory.join("victim.txt");
-        std::fs::write(&victim, b"safe")?;
-        std::os::unix::fs::symlink(&victim, directory.join("out.png.tmp"))?;
-
-        write_atomic(&target, b"new").map_err(std::io::Error::other)?;
-
-        assert_eq!(std::fs::read(&victim)?, b"safe");
-        assert_eq!(std::fs::read(&target)?, b"new");
-
-        let _ = std::fs::remove_dir_all(&directory);
+#[cfg(not(target_arch = "wasm32"))]
+fn stage_file_backup(
+    target_path: &std::path::Path,
+    meta: &std::fs::Metadata,
+    reserved: &mut std::collections::HashSet<std::path::PathBuf>,
+) -> std::io::Result<std::path::PathBuf> {
+    let (backup_path, mut backup_file) = create_temp_excluding(target_path, reserved).map_err(|e| std::io::Error::other(e.to_string()))?;
+    reserved.insert(backup_path.clone());
+    let copy_result = (|| -> std::io::Result<()> {
+        let mut src = std::fs::File::open(target_path)?;
+        std::io::copy(&mut src, &mut backup_file)?;
+        backup_file.set_permissions(meta.permissions())?;
+        backup_file.sync_all()?;
         Ok(())
+    })();
+    drop(backup_file);
+    if let Err(error) = copy_result {
+        let _ = std::fs::remove_file(&backup_path);
+        return Err(error);
     }
+    Ok(backup_path)
+}
+
+#[cfg(test)]
+mod batch_atomic_tests {
+    use super::{write_batch_atomic, write_batch_atomic_with_hook};
 
     #[test]
     fn write_batch_atomic_publishes_nothing_on_failure() -> std::io::Result<()> {
@@ -348,6 +393,56 @@ mod atomic_tests {
         assert_eq!(std::fs::read(&existing)?, b"old");
         assert!(!fresh.exists());
         assert!(std::fs::read_dir(&directory)?.all(|entry| !entry.unwrap().file_name().to_string_lossy().ends_with(".tmp")));
+
+        let _ = std::fs::remove_dir_all(&directory);
+        Ok(())
+    }
+}
+
+#[cfg(all(test, unix))]
+mod atomic_tests {
+    use super::{write_atomic, write_batch_atomic_with_hook};
+
+    #[test]
+    fn write_atomic_does_not_follow_a_planted_temp_symlink() -> std::io::Result<()> {
+        let directory = std::env::temp_dir().join(format!("tc-atomic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory)?;
+        let target = directory.join("out.png");
+        let victim = directory.join("victim.txt");
+        std::fs::write(&victim, b"safe")?;
+        std::os::unix::fs::symlink(&victim, directory.join("out.png.tmp"))?;
+
+        write_atomic(&target, b"new").map_err(std::io::Error::other)?;
+
+        assert_eq!(std::fs::read(&victim)?, b"safe");
+        assert_eq!(std::fs::read(&target)?, b"new");
+
+        let _ = std::fs::remove_dir_all(&directory);
+        Ok(())
+    }
+
+    #[test]
+    fn write_batch_atomic_rolls_back_symlink_target_without_touching_referent() -> std::io::Result<()> {
+        let directory = std::env::temp_dir().join(format!("tc-batch-symlink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory)?;
+        let referent = directory.join("referent.png");
+        std::fs::write(&referent, b"referent-bytes")?;
+        let link = directory.join("link.png");
+        std::os::unix::fs::symlink(&referent, &link)?;
+        let late = directory.join("late.png");
+
+        let result = write_batch_atomic_with_hook([(link.as_path(), b"new".as_slice()), (late.as_path(), b"late".as_slice())], |index, target| {
+            if index == 1 {
+                std::fs::create_dir_all(target)?;
+            }
+            Ok(())
+        });
+
+        assert!(result.is_err());
+        assert_eq!(std::fs::read_link(&link)?, referent);
+        assert_eq!(std::fs::read(&referent)?, b"referent-bytes");
 
         let _ = std::fs::remove_dir_all(&directory);
         Ok(())
