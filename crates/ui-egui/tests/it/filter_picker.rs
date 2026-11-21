@@ -133,7 +133,7 @@ fn add_filter_reopens_closed_properties_to_show_its_picker() {
 
     add_filter_from_the_wand(&mut harness);
 
-    assert!(harness.query_by_role_and_label(Role::ComboBox, "Filter").is_some(), "Add filter reveals Properties");
+    assert!(harness.query_by_role_and_label(Role::ComboBox, "HSL Perceptive").is_some(), "Add filter reveals Properties");
     assert!(harness.query_by_label("Sharpen").is_some(), "the picker opens immediately");
 }
 
