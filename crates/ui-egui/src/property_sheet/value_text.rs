@@ -8,14 +8,13 @@ use crate::theme::semibold;
 
 type ValueTextDrafts = egui::cache::FramePublisher<Id, Option<ValueTextDraft>>;
 
-/// A value drawn right-aligned at `right` in a `width` wide box centred on `center_y`, reading `shown`; typing may end in `suffix`; it answers as `label`'s value
+/// A value drawn right-aligned at `right` in a `width` wide box centred on `center_y`, reading `shown`; it answers as `label`'s value
 pub(super) struct ValueText<'a> {
     pub(super) label: &'a dyn std::fmt::Display,
     pub(super) right: f32,
     pub(super) width: f32,
     pub(super) center_y: f32,
     pub(super) shown: &'a str,
-    pub(super) suffix: &'a str,
 }
 
 /// How far below a value's centre its typing line runs

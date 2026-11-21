@@ -20,6 +20,24 @@ const TRACK_WIDTH: f32 = 2.0;
 /// Half the height of a signed slider's zero tick
 const ZERO_TICK_HALF: f32 = 4.0;
 
+/// The numeric value, bounds and display format shared by a slider and its text editor.
+pub(super) struct SliderValue<'a> {
+    value: f32,
+    range: &'a RangeInclusive<f32>,
+    decimals: usize,
+    suffix: &'a str,
+}
+
+impl<'a> SliderValue<'a> {
+    pub(super) fn new(value: f32, range: &'a RangeInclusive<f32>, decimals: usize, suffix: &'a str) -> Self {
+        Self { value, range, decimals, suffix }
+    }
+
+    fn shown(&self) -> String {
+        format!("{}{}", shown_number(self.value, self.decimals), self.suffix)
+    }
+}
+
 impl PropertySheet<'_> {
     pub(crate) fn slider(&mut self, label: &str, value: &mut f32, range: RangeInclusive<f32>, decimals: usize) -> Option<bool> {
         self.slider_with_suffix(label, value, range, decimals, "")
@@ -30,7 +48,7 @@ impl PropertySheet<'_> {
         let id = self.next_id();
         let track = Track { start: control.left() + KNOB_RADIUS, end: self.track_end(), center_y, zero: None, ramp: false };
         let dragged = self.track(id, label, &track, value, &range);
-        let typed = self.value_field(id, label, center_y, *value, &range, decimals, suffix);
+        let typed = self.value_field(id, label, center_y, SliderValue::new(*value, &range, decimals, suffix));
         Self::apply_typed(value, typed, dragged)
     }
 
@@ -39,7 +57,7 @@ impl PropertySheet<'_> {
         let id = self.next_id();
         let track = Track { start: control.left() + KNOB_RADIUS, end: self.track_end(), center_y, zero: Some(0.0), ramp: false };
         let dragged = self.track(id, label, &track, value, &range);
-        let typed = self.value_field(id, label, center_y, *value, &range, decimals, "");
+        let typed = self.value_field(id, label, center_y, SliderValue::new(*value, &range, decimals, ""));
         Self::apply_typed(value, typed, dragged)
     }
 
@@ -96,38 +114,20 @@ impl PropertySheet<'_> {
         edit
     }
 
-    pub(super) fn value_field(
-        &mut self,
-        id: Id,
-        label: impl std::fmt::Display,
-        center_y: f32,
-        value: f32,
-        range: &RangeInclusive<f32>,
-        decimals: usize,
-        suffix: &str,
-    ) -> Option<f32> {
-        let shown = format!("{}{suffix}", shown_number(value, decimals));
-        self.column_value_field(id, &label, center_y, &shown, suffix, value, range, decimals)
+    pub(super) fn value_field(&mut self, id: Id, label: impl std::fmt::Display, center_y: f32, field: SliderValue<'_>) -> Option<f32> {
+        let shown = field.shown();
+        self.column_value_field(id, &label, center_y, &shown, field)
     }
 
-    pub(super) fn column_value_field(
-        &mut self,
-        id: Id,
-        label: &dyn std::fmt::Display,
-        center_y: f32,
-        shown: &str,
-        suffix: &str,
-        value: f32,
-        range: &RangeInclusive<f32>,
-        decimals: usize,
-    ) -> Option<f32> {
+    pub(super) fn column_value_field(&mut self, id: Id, label: &dyn std::fmt::Display, center_y: f32, shown: &str, field: SliderValue<'_>) -> Option<f32> {
         self.measure_value(shown);
         let width = self.used.value_width.max(super::VALUE_MIN_WIDTH);
-        self.value_text_field(id, ValueText { label, right: self.right, width, center_y, shown, suffix }, value, range, decimals)
+        self.value_text_field(id, ValueText { label, right: self.right, width, center_y, shown }, field)
     }
 
-    pub(super) fn value_text_field(&mut self, id: Id, value_text: ValueText<'_>, value: f32, range: &RangeInclusive<f32>, decimals: usize) -> Option<f32> {
-        let ValueText { label, right, width, center_y, shown, suffix } = value_text;
+    fn value_text_field(&mut self, id: Id, value_text: ValueText<'_>, field: SliderValue<'_>) -> Option<f32> {
+        let ValueText { label, right, width, center_y, shown } = value_text;
+        let SliderValue { value, range, decimals, suffix } = field;
         let rect = Rect::from_min_max(pos2(right - width, center_y - ROW_HIT_HALF_HEIGHT), pos2(right, center_y + ROW_HIT_HALF_HEIGHT));
         let field_id = id.with((self.id, "typed"));
         let editing = self.typing_draft(field_id);
