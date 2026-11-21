@@ -503,3 +503,14 @@ pub fn panel_header(ui: &mut Ui, title: &str, trailing: impl FnOnce(&mut Ui)) {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), trailing);
     });
 }
+
+pub(crate) fn press_edit(ui: &Ui, id: egui::Id, changed: bool) -> Option<bool> {
+    let held = ui.input(|input| input.pointer.any_down());
+    if !held {
+        // The press is over: the next one starts its own undo step
+        ui.data_mut(|data| data.remove_temp::<bool>(id));
+        return changed.then_some(false);
+    }
+
+    changed.then(|| ui.data_mut(|data| std::mem::replace(data.get_temp_mut_or_default::<bool>(id), true)))
+}

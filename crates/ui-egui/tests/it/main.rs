@@ -93,3 +93,31 @@ mod stencil;
 mod symmetry;
 mod symmetry_2d;
 mod tile_generator_panel;
+
+mod panel_header;
+use egui_kittest::Harness;
+use egui_kittest::kittest::{NodeT, Queryable};
+use texturecraft_ui_egui::TextureCraftApp;
+const TEXTURE_RESOLUTION: u32 = 256;
+const BAKE_RESOLUTION: u32 = 64;
+const STARTUP_FRAMES: usize = 4;
+const SETTLE_FRAMES: usize = 3;
+fn click_at(harness: &mut Harness<'_, TextureCraftApp>, at: egui::Pos2) {
+    harness.hover_at(at);
+    for pressed in [true, false] {
+        harness.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE });
+        harness.run_steps(1);
+    }
+
+    harness.run_steps(SETTLE_FRAMES);
+}
+
+fn panel_close_button(harness: &Harness<'_, TextureCraftApp>, title: egui::Rect) -> egui::Rect {
+    harness
+        .get_all_by_role(egui::Role::Button)
+        .filter(|button| button.accesskit_node().label().as_deref() == Some("Close Panel"))
+        .map(|button| button.rect())
+        .filter(|close| close.min.x > title.max.x && title.y_range().contains(close.center().y))
+        .min_by(|a, b| a.min.x.total_cmp(&b.min.x))
+        .expect("a close button right of the title")
+}

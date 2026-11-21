@@ -1798,7 +1798,8 @@ pub(crate) fn properties_title(app: &TextureCraftApp) -> String {
     let what = match (app.session.selected_layer().and_then(|id| project.layers.get(&id)), app.session.target) {
         // Polygon fill keeps its own properties wherever it can fill
         _ if tool == Tool::PolygonFill && tool_usable => tr(tool.label()).to_string(),
-        (Some(_), StackTarget::Effect(effect)) => project.effect(effect).map(|(_, found)| found.name.clone()).unwrap_or_default(),
+        // The effect's type, not its own name (every filter reads "Filter")
+        (Some(_), StackTarget::Effect(effect)) => project.effect(effect).map(|(_, found)| tr(effect_type_label(&found.kind)).to_string()).unwrap_or_default(),
         (Some(layer), StackTarget::Content) if matches!(layer.kind, LayerKind::Fill(_)) => tr("Fill").to_string(),
         (Some(layer), StackTarget::Content) if layer.is_group() => tr("Folder").to_string(),
         (Some(layer), StackTarget::Content) if layer.instance_source().is_some() => tr("Instance").to_string(),
@@ -1807,6 +1808,13 @@ pub(crate) fn properties_title(app: &TextureCraftApp) -> String {
         _ => tr(tool.label()).to_string(),
     };
     format!("{} - {what}", tr("Properties"))
+}
+
+fn effect_type_label(kind: &EffectKind) -> &'static str {
+    match kind {
+        EffectKind::Filter(_) => n_("Filter"),
+        other => other.name(),
+    }
 }
 
 pub(crate) fn properties(app: &mut TextureCraftApp, ui: &mut Ui) {
@@ -1885,13 +1893,15 @@ fn height_mask_section(app: &mut TextureCraftApp, ui: &mut Ui, layer: &Layer) {
             app.run("layer.set", json!({"layer": id, "heightMask": {"enabled": on}}));
         }
         ui.add_enabled_ui(hm.enabled, |ui| {
-            let (mut contrast, mut offset) = (hm.contrast, hm.offset);
-            if let Some(merge) = slider_edit(ui, tr("Contrast"), &mut contrast, 0.0..=16.0, 2) {
-                app.run("layer.set", json!({"layer": id, "heightMask": {"contrast": contrast}, "merge": merge}));
-            }
-            if let Some(merge) = slider_edit(ui, tr("Height offset"), &mut offset, -1.0..=1.0, 2) {
-                app.run("layer.set", json!({"layer": id, "heightMask": {"offset": offset}, "merge": merge}));
-            }
+            crate::property_sheet::PropertySheet::show(ui, ("height_mask", id), |sheet| {
+                let (mut contrast, mut offset) = (hm.contrast, hm.offset);
+                if let Some(merge) = sheet.slider(tr("Contrast"), &mut contrast, 0.0..=16.0, 2) {
+                    app.run("layer.set", json!({"layer": id, "heightMask": {"contrast": contrast}, "merge": merge}));
+                }
+                if let Some(merge) = sheet.signed_slider(tr("Height offset"), &mut offset, -1.0..=1.0, 2) {
+                    app.run("layer.set", json!({"layer": id, "heightMask": {"offset": offset}, "merge": merge}));
+                }
+            });
         });
     });
 }
