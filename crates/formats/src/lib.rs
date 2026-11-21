@@ -120,11 +120,15 @@ pub(crate) fn read_capped(path: &std::path::Path, cap: u64) -> Result<Vec<u8>> {
 /// Create a new temporary file beside `path`, refusing to reuse an existing (possibly symlinked) name.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn create_temp(path: &std::path::Path) -> Result<(std::path::PathBuf, std::fs::File)> {
-    create_temp_excluding(path, &std::collections::HashSet::new())
+    create_temp_with_mode(path, &std::collections::HashSet::new(), None)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn create_temp_excluding(path: &std::path::Path, excluded: &std::collections::HashSet<std::path::PathBuf>) -> Result<(std::path::PathBuf, std::fs::File)> {
+fn create_temp_with_mode(
+    path: &std::path::Path,
+    excluded: &std::collections::HashSet<std::path::PathBuf>,
+    #[cfg_attr(not(unix), allow(unused_variables))] unix_mode: Option<u32>,
+) -> Result<(std::path::PathBuf, std::fs::File)> {
     let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
     let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("out");
 
@@ -136,7 +140,14 @@ fn create_temp_excluding(path: &std::path::Path, excluded: &std::collections::Ha
         if excluded.contains(&temporary_path) {
             continue;
         }
-        match std::fs::OpenOptions::new().write(true).create_new(true).open(&temporary_path) {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        if let Some(mode) = unix_mode {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(mode);
+        }
+        match options.open(&temporary_path) {
             Ok(file) => return Ok((temporary_path, file)),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(error.into()),
@@ -177,14 +188,18 @@ fn write_batch_atomic_with_hook<'a>(
 ) -> Result<()> {
     use std::io::Write;
 
+    // Serialize in-process batch publications so concurrent tasks cannot interleave backups/rollbacks.
+    static BATCH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = BATCH_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+
     let entries: Vec<(&std::path::Path, &[u8])> = entries.into_iter().collect();
     if entries.is_empty() {
         return Ok(());
     }
     let mut reserved: std::collections::HashSet<std::path::PathBuf> = entries.iter().map(|(path, _)| path.to_path_buf()).collect();
-    let mut staged: Vec<(std::path::PathBuf, &std::path::Path)> = Vec::with_capacity(entries.len());
-    let cleanup_staged = |staged: &[(std::path::PathBuf, &std::path::Path)]| {
-        for (temp_path, _) in staged {
+    let mut staged: Vec<(std::path::PathBuf, &std::path::Path, &[u8])> = Vec::with_capacity(entries.len());
+    let cleanup_staged = |staged: &[(std::path::PathBuf, &std::path::Path, &[u8])]| {
+        for (temp_path, _, _) in staged {
             let _ = std::fs::remove_file(temp_path);
         }
     };
@@ -194,7 +209,7 @@ fn write_batch_atomic_with_hook<'a>(
             cleanup_staged(&staged);
             return Err(FormatError::Io(std::io::Error::other(format!("{} is a directory", path.display()))));
         }
-        let (temporary_path, mut file) = match create_temp_excluding(path, &reserved) {
+        let (temporary_path, mut file) = match create_temp_with_mode(path, &reserved, None) {
             Ok(pair) => pair,
             Err(error) => {
                 cleanup_staged(&staged);
@@ -209,12 +224,12 @@ fn write_batch_atomic_with_hook<'a>(
             cleanup_staged(&staged);
             return Err(error.into());
         }
-        staged.push((temporary_path, path));
+        staged.push((temporary_path, path, bytes));
     }
 
     // Single-file writes have no earlier publications to roll back, so rename directly.
     if staged.len() == 1 {
-        let (ref temporary_path, target_path) = staged[0];
+        let (ref temporary_path, target_path, _) = staged[0];
         if let Err(error) = before_rename(0, target_path).and_then(|()| std::fs::rename(temporary_path, target_path)) {
             let _ = std::fs::remove_file(temporary_path);
             return Err(error.into());
@@ -222,13 +237,23 @@ fn write_batch_atomic_with_hook<'a>(
         return Ok(());
     }
 
-    let mut published: Vec<(&std::path::Path, Option<RollbackBackup>)> = Vec::with_capacity(staged.len());
-    let rollback = |published: &mut Vec<(&std::path::Path, Option<RollbackBackup>)>,
-                    remaining: &[(std::path::PathBuf, &std::path::Path)],
+    let mut published: Vec<(&std::path::Path, &[u8], Option<RollbackBackup>)> = Vec::with_capacity(staged.len());
+    let rollback = |published: &mut Vec<(&std::path::Path, &[u8], Option<RollbackBackup>)>,
+                    remaining: &[(std::path::PathBuf, &std::path::Path, &[u8])],
                     cause: std::io::Error|
      -> FormatError {
         let mut incomplete = Vec::new();
-        for (target_path, backup) in published.drain(..).rev() {
+        for (target_path, expected_bytes, backup) in published.drain(..).rev() {
+            // Do not overwrite if an external writer modified the target after we published it.
+            let still_ours = std::fs::read(target_path).ok().as_deref() == Some(expected_bytes);
+            if !still_ours {
+                if let Some(RollbackBackup::File(backup_path)) = backup {
+                    incomplete.push(format!("{} (modified by another writer; backup at {})", target_path.display(), backup_path.display()));
+                } else {
+                    incomplete.push(format!("{} (modified by another writer)", target_path.display()));
+                }
+                continue;
+            }
             match backup {
                 Some(RollbackBackup::File(backup_path)) => {
                     if let Err(err) = std::fs::rename(&backup_path, target_path) {
@@ -258,6 +283,7 @@ fn write_batch_atomic_with_hook<'a>(
 
     for index in 0..staged.len() {
         let target_path = staged[index].1;
+        let expected_bytes = staged[index].2;
         if let Err(error) = before_rename(index, target_path) {
             return Err(rollback(&mut published, &staged[index..], error));
         }
@@ -269,6 +295,8 @@ fn write_batch_atomic_with_hook<'a>(
                         Ok(link_target) => Some(RollbackBackup::Symlink(link_target)),
                         Err(error) => return Err(rollback(&mut published, &staged[index..], error)),
                     }
+                } else if !meta.file_type().is_file() {
+                    return Err(rollback(&mut published, &staged[index..], std::io::Error::other(format!("{} is not a regular file", target_path.display()))));
                 } else {
                     match stage_file_backup(target_path, &meta, &mut reserved) {
                         Ok(path) => Some(RollbackBackup::File(path)),
@@ -277,6 +305,13 @@ fn write_batch_atomic_with_hook<'a>(
                 }
                 #[cfg(not(unix))]
                 {
+                    if !meta.file_type().is_file() {
+                        return Err(rollback(
+                            &mut published,
+                            &staged[index..],
+                            std::io::Error::other(format!("{} is not a regular file", target_path.display())),
+                        ));
+                    }
                     match stage_file_backup(target_path, &meta, &mut reserved) {
                         Ok(path) => Some(RollbackBackup::File(path)),
                         Err(error) => return Err(rollback(&mut published, &staged[index..], error)),
@@ -293,10 +328,10 @@ fn write_batch_atomic_with_hook<'a>(
             }
             return Err(rollback(&mut published, &staged[index..], error));
         }
-        published.push((target_path, backup));
+        published.push((target_path, expected_bytes, backup));
     }
 
-    for (_, backup) in published {
+    for (_, _, backup) in published {
         if let Some(RollbackBackup::File(backup_path)) = backup {
             let _ = std::fs::remove_file(backup_path);
         }
@@ -311,7 +346,7 @@ fn stage_file_backup(
     meta: &std::fs::Metadata,
     reserved: &mut std::collections::HashSet<std::path::PathBuf>,
 ) -> std::io::Result<std::path::PathBuf> {
-    let (backup_path, mut backup_file) = create_temp_excluding(target_path, reserved).map_err(|e| std::io::Error::other(e.to_string()))?;
+    let (backup_path, mut backup_file) = create_temp_with_mode(target_path, reserved, Some(0o600)).map_err(|e| std::io::Error::other(e.to_string()))?;
     reserved.insert(backup_path.clone());
     let copy_result = (|| -> std::io::Result<()> {
         let mut src = std::fs::File::open(target_path)?;
@@ -411,7 +446,7 @@ mod atomic_tests {
         let target = directory.join("out.png");
         let victim = directory.join("victim.txt");
         std::fs::write(&victim, b"safe")?;
-        std::os::unix::fs::symlink(&victim, directory.join("out.png.tmp"))?;
+        std::os::unix::fs::symlink(&victim, directory.join(format!(".out.png.{}.0.tmp", std::process::id())))?;
 
         write_atomic(&target, b"new").map_err(std::io::Error::other)?;
 
