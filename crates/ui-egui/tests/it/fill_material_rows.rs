@@ -9,6 +9,7 @@ use serde_json::json;
 use texturecraft_engine::compose::ImageRes;
 use texturecraft_engine::core::{Channel, CookResolution, LayerId, LayerKind, LinkParam, MaterialLink, Procedural, ProceduralKind, Source};
 use texturecraft_ui_egui::TextureCraftApp;
+use texturecraft_ui_egui::screen_pick::{PickOutcome, ScreenPick};
 
 use crate::fill_support::{click_node, fill_app, fill_of};
 use crate::filter_support::{along, click_at, drag, undo_depth};
@@ -734,6 +735,74 @@ fn a_plain_fill_switches_to_one_whole_material_picks_it_from_its_card_and_clears
 
     assert_eq!(whole_material(&harness, layer), None, "× drops the material");
     assert_eq!(source(&harness, layer, Channel::BaseColor), Source::uniform_of(Channel::BaseColor), "and returns the channels to their defaults");
+}
+
+/// Arms the base colour bar's eyedropper and gives its pick the click outside the app that ended as `outcome`
+fn pick_outside(harness: &mut Harness<'_, TextureCraftApp>, outcome: PickOutcome) {
+    click_bar_eyedropper(harness);
+    harness.run_steps(SETTLE_FRAMES);
+    let bar = harness.state().picking_color.expect("the eyedropper waits for a click");
+    harness.state_mut().screen_pick = Some(ScreenPick::ended(bar, outcome));
+    harness.run_steps(SETTLE_FRAMES);
+}
+
+#[test]
+fn a_click_outside_the_app_hands_its_screen_colour_to_the_bar_and_a_cancelled_or_impossible_one_changes_nothing() {
+    let (mut harness, layer) = app_with_fill(json!({"color": [0.2, 0.2, 0.2]}));
+    assert!(!harness.state().screen_picking, "tests have no real window: no system hook or grab");
+
+    let before = base_color(&harness, layer);
+    click(&mut harness, Role::Button, "Base color");
+
+    pick_outside(&mut harness, PickOutcome::Unavailable);
+
+    assert!(harness.state().picking_color.is_some(), "where the system cannot read the screen the pick stays on the model");
+    assert_eq!(base_color(&harness, layer), before, "nothing changes until a click");
+
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(SETTLE_FRAMES);
+
+    assert!(harness.state().picking_color.is_none() && harness.state().screen_pick.is_none(), "Escape ends the pick and its wait");
+
+    pick_outside(&mut harness, PickOutcome::Cancelled);
+
+    assert!(harness.state().picking_color.is_none(), "dismissing the desktop's picker ends the pick");
+    assert_eq!(base_color(&harness, layer), before, "a cancelled pick changes nothing");
+
+    let undo_before = undo_depth(&harness);
+    pick_outside(&mut harness, PickOutcome::Picked([255, 128, 0]));
+    let picked = base_color(&harness, layer);
+    let expected = [1.0, texturecraft_engine::texel::srgb_to_linear(128.0 / 255.0), 0.0];
+    assert!(picked.iter().zip(expected).all(|(a, b)| (a - b).abs() < 1e-3), "the screen's sRGB pixel is stored linear: {picked:?}");
+    assert!(harness.state().picking_color.is_none() && harness.state().screen_pick.is_none(), "the click ends the pick");
+    assert_eq!(undo_depth(&harness), undo_before + 1, "one undo step");
+}
+
+#[test]
+fn an_armed_eyedropper_is_the_pointer_over_the_whole_window_and_the_app_losing_the_focus_ends_it() {
+    let (mut harness, layer) = app_with_fill(json!({"color": [0.2, 0.2, 0.2]}));
+    let before = base_color(&harness, layer);
+    click(&mut harness, Role::Button, "Base color");
+    click_bar_eyedropper(&mut harness);
+    harness.run_steps(SETTLE_FRAMES);
+    let bar = harness.state().picking_color.expect("the eyedropper waits for a click");
+
+    harness.get_by_role_and_label(Role::Tab, "Material").hover();
+    harness.run_steps(SETTLE_FRAMES);
+    let pointer = harness.output().platform_output.cursor_icon;
+    assert_eq!(pointer, egui::CursorIcon::None, "over the Properties panel, not only the 3D view, the drawn eyedropper is the pointer");
+
+    harness.state_mut().screen_pick = Some(ScreenPick::waiting(bar));
+    harness.run_steps(SETTLE_FRAMES);
+
+    assert!(harness.state().picking_color.is_some(), "a focused app keeps waiting");
+
+    harness.input_mut().viewports.entry(egui::ViewportId::ROOT).or_default().focused = Some(false);
+    harness.run_steps(SETTLE_FRAMES);
+
+    assert!(harness.state().picking_color.is_none() && harness.state().screen_pick.is_none(), "another app came forward: the pick ends");
+    assert_eq!(base_color(&harness, layer), before, "nothing changes");
+    assert_ne!(harness.output().platform_output.cursor_icon, egui::CursorIcon::None, "the pointer is the user's again");
 }
 
 #[test]

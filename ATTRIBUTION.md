@@ -41,6 +41,18 @@ These come from Rust crate dependencies (not files in this repository) and keep 
 Without craft-fonts, Chinese, Japanese, Korean and Arabic UI text uses the operating system's fonts at run
 time (nothing is bundled); see [docs/localization-parity.md](docs/localization-parity.md).
 
+## Native eyedropper dependencies
+
+| Crate | Use | Upstream | License |
+|---|---|---|---|
+| `raw-window-handle` | Identify native application windows | https://github.com/rust-windowing/raw-window-handle | MIT OR Apache-2.0 OR Zlib |
+| `winsafe` | Windows pointer and event handling | https://github.com/rodrigocfd/winsafe | MIT |
+| `xcap` | Windows screen pixel capture | https://github.com/nashaofu/xcap | Apache-2.0 |
+| `widestring` | Windows string handling through `xcap` | https://github.com/VoidStarKat/widestring-rs | MIT OR Apache-2.0 |
+| `target-lexicon` | Lockfile only through the non-Windows dependencies of `xcap`, which TextureCraft builds only on Windows. A maintainer approved this use in the review of #698. | https://github.com/bytecodealliance/target-lexicon | Apache-2.0 WITH LLVM-exception |
+| `x11rb` | X11 pointer and pixel capture | https://github.com/psychon/x11rb | MIT OR Apache-2.0 |
+| `zbus` | Wayland desktop color-picker portal | https://github.com/z-galaxy/zbus | MIT |
+
 ## Procedural content (no asset files)
 
 Built-in environments (`crates/render/src/ibl.rs`), smart materials and procedurals
