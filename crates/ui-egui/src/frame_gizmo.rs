@@ -999,6 +999,9 @@ pub(crate) mod tests {
 
         // Move on model held with Shift turns the frame round its normal
         let before = placement(&projection(&harness, layer), harness.state().session.mesh.bounds()).unwrap();
+        // Placing the frame adds decal controls above the preview. Scroll the pad into view before pressing it.
+        harness.get_by_label("Move on model").scroll_to_me();
+        harness.run_steps(3);
         let button = harness.get_by_label("Move on model").rect().center();
         drag_frames(&mut harness, layer, button, button + vec2(-60.0, 0.0), Modifiers::SHIFT, true, check(layer));
         let turned = placement(&projection(&harness, layer), harness.state().session.mesh.bounds()).unwrap();
