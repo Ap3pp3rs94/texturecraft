@@ -105,8 +105,7 @@ fn the_empty_views_keep_the_view_picker_and_drop_the_camera_picker() {
 
     assert!(!has_camera_picker(&empty), "no camera picker");
 
-    // The picker shows "Material" right of the tool shelf and the Assets panel: one per view in the split layout
-    let pickers = painted(&empty).iter().filter(|(text, x)| text == "Material" && *x > 400.0).count();
+    let pickers = empty.get_all_by_role(egui::Role::ComboBox).filter(|node| node.value().as_deref() == Some("Material")).count();
 
     assert_eq!(pickers, 2, "each of the two views keeps its view picker");
 
