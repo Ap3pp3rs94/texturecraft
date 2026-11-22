@@ -2678,7 +2678,9 @@ mod tests {
 
         let mut session = texturecraft_engine::sample_session(256, 64).unwrap();
         execute(&mut session, "layer.add.fill", &json!(null)).unwrap();
-        let effect = texturecraft_engine::core::LayerId(execute(&mut session, "mask.add.colorSelection", &json!(null)).unwrap()["effect"].as_u64().unwrap());
+        execute(&mut session, "mask.add.colorSelection", &json!(null)).unwrap();
+        let layer = session.doc.project.layer(session.selected_layer().unwrap()).unwrap();
+        let effect = layer.mask.as_ref().expect("the fill has a color-selection mask").effects[0].id;
         session.target = StackTarget::Effect(effect);
         let mut harness = egui_kittest::Harness::builder().build_eframe(|context| TextureCraftApp::new(context, session));
         harness.run_steps(2);
