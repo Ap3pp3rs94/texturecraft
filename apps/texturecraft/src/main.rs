@@ -5,11 +5,22 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+#[cfg(test)]
+mod build_channel;
+mod build_flavor;
 mod control_server;
 mod gpu;
+mod launch_profile;
+mod nightly_session;
+mod process_identity;
+mod profile_root;
 mod window_frame;
 
+use std::ffi::OsString;
+
+use launch_profile::Profile;
 use texturecraft_engine::Session;
+use texturecraft_ui_egui::os_window::{self, LaunchIdentity};
 use texturecraft_ui_egui::titlebar::TitleBar;
 use texturecraft_ui_egui::ui_state_store;
 use texturecraft_ui_egui::{TextureCraftApp, UiState};
@@ -23,8 +34,15 @@ const DEFAULT_SIZE: [f32; 2] = [1600.0, 960.0];
 const MIN_SIZE: [f32; 2] = [960.0, 600.0];
 
 const ICON_PNG: &[u8] = include_bytes!("../../../assets/app-icon/hicolor/256x256/apps/ai.storyteller.texturecraft.png");
+/// The Nightly window icon: the same artwork on the deeper background the package icon uses.
+const NIGHTLY_ICON_PNG: &[u8] = include_bytes!("../../../assets/app-icon/texturecraft-nightly.png");
 
+/// The version line: a Nightly build names its exact feed identity and channel, and every other
+/// build keeps the workspace version with the commit and date it was built from.
 fn version() -> String {
+    if build_flavor::COMPILED == build_flavor::BuildFlavor::NightlyV1 {
+        return build_flavor::version(build_flavor::COMPILED);
+    }
     let sha = env!("TEXTURECRAFT_BUILD_SHA");
     let short = sha.get(..7).unwrap_or(sha);
     let date = env!("TEXTURECRAFT_BUILD_DATE");
@@ -44,15 +62,22 @@ struct Args {
     power_pref: Option<eframe::wgpu::PowerPreference>,
 }
 
-fn parse_args() -> Result<Option<Args>, String> {
-    parse_args_from(std::env::args().skip(1))
-}
-
 fn parse_args_from<I: IntoIterator<Item = String>>(it: I) -> Result<Option<Args>, String> {
     let mut args = Args { file: None, control: None, empty: false, gpu: None, power_pref: None };
     let mut it = it.into_iter();
+    // Everything after `--` is a file, even when it looks like an option: the Launcher's nightly
+    // protocol passes the selected file that way (and a file may be called `--version`).
+    let mut after_delimiter = false;
     while let Some(a) = it.next() {
+        if after_delimiter {
+            if args.file.is_some() {
+                return Err("only one project or mesh can be opened".into());
+            }
+            args.file = Some(a);
+            continue;
+        }
         match a.as_str() {
+            "--" => after_delimiter = true,
             "--version" | "-V" => {
                 println!("{}", version());
                 return Ok(None);
@@ -119,7 +144,8 @@ fn initial_session(args: &Args) -> Session {
 }
 
 fn icon() -> Option<egui::IconData> {
-    let img = craft_image_codecs::decode(ICON_PNG).ok()?;
+    let png = if build_flavor::COMPILED == build_flavor::BuildFlavor::NightlyV1 { NIGHTLY_ICON_PNG } else { ICON_PNG };
+    let img = craft_image_codecs::decode(png).ok()?;
     Some(egui::IconData { rgba: img.to_rgba8(), width: img.width(), height: img.height() })
 }
 
@@ -134,12 +160,14 @@ fn set_taskbar_icon(w: &winit::window::Window) {
     }
 }
 
-/// Directory for saved settings, UI state, and error logs.
-///
-/// Honors `TEXTURECRAFT_DATA_DIR` (when non-empty) so nightly installs can keep
-/// their own profile separate from stable.
+/// Directory for saved settings, UI state, and error logs: a Nightly launch's validated profile,
+/// else `TEXTURECRAFT_DATA_DIR` (when non-empty, as a package wrapper sets it), else eframe's own
+/// folder for this app.
 fn storage_dir() -> Option<std::path::PathBuf> {
-    if let Some(dir) = std::env::var_os("TEXTURECRAFT_DATA_DIR").filter(|v| !v.is_empty()) {
+    if let Some(root) = launch_profile::current().root() {
+        return Some(root.to_path_buf());
+    }
+    if let Some(dir) = std::env::var_os(launch_profile::ROOT_ENV).filter(|v| !v.is_empty()) {
         return Some(std::path::PathBuf::from(dir));
     }
     eframe::storage_dir(APP_NAME)
@@ -162,6 +190,10 @@ fn saved_prefs(ui_file: Option<&std::path::Path>, persistence_path: Option<&std:
 struct Shell {
     app: TextureCraftApp,
     window_frame: Option<window_frame::WindowFrameFn>,
+    /// Runs once when the window closes. On macOS that is the only place a clean quit is handled:
+    /// Cmd+Q ends the process inside AppKit's terminate, after eframe's `on_exit` and before
+    /// `eframe::run_native` returns, so the Nightly session record is finished here, not there.
+    exit_hook: Option<Box<dyn FnOnce()>>,
     #[cfg(target_os = "macos")]
     movable: Option<bool>,
 }
@@ -194,6 +226,12 @@ impl eframe::App for Shell {
         #[cfg(target_os = "macos")]
         texturecraft_ui_egui::titlebar::sync_native(&self.app.title_bar, ui, frame, &mut self.movable);
     }
+
+    fn on_exit(&mut self) {
+        if let Some(hook) = self.exit_hook.take() {
+            hook();
+        }
+    }
 }
 
 /// A script driving the app gets no network check and no update prompt over its window.
@@ -201,20 +239,98 @@ fn checks_for_updates_at_start(control: Option<u16>) -> bool {
     control.is_none()
 }
 
+/// The AppUserModelID a Nightly window is grouped under, set before any native window exists.
+fn initialize_nightly_process_identity() -> Result<(), process_identity::IdentityError> {
+    process_identity::initialize(build_flavor::COMPILED == build_flavor::BuildFlavor::NightlyV1, os_window::id_for(LaunchIdentity::NightlyV1))
+}
+
+/// A refused Nightly start explains itself in a dialog where there is a desktop to show one.
+fn report_launch_profile_error(error: &str) {
+    eprintln!("texturecraft: {error}");
+    let desktop_session = cfg!(windows)
+        || cfg!(target_os = "macos")
+        || (cfg!(target_os = "linux") && ["DISPLAY", "WAYLAND_DISPLAY"].into_iter().any(|key| std::env::var_os(key).is_some_and(|v| !v.is_empty())));
+    if build_flavor::needs_native_error(build_flavor::COMPILED, desktop_session) {
+        if let Err(error) = initialize_nightly_process_identity() {
+            eprintln!("texturecraft: {error}");
+            return;
+        }
+        #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+        let _ = rfd::MessageDialog::new()
+            .set_title(os_window::name_for(LaunchIdentity::NightlyV1))
+            .set_description(error)
+            .set_level(rfd::MessageLevel::Error)
+            .set_buttons(rfd::MessageButtons::Ok)
+            .show();
+    }
+}
+
+/// Select the immutable launch profile before any startup service or side effect, and answer the
+/// Launcher's version queries before root validation, logging, IPC or a window. `None` means the
+/// launch is already answered and the process returns.
+fn prepare_launch() -> Option<Vec<OsString>> {
+    let argv: Vec<OsString> = std::env::args_os().skip(1).collect();
+    // Plain `--version`, or the Launcher's `--launch-profile nightly-v1 --profile-root <dir>
+    // --version`: both are answered here, with nothing but standard output written.
+    if build_flavor::COMPILED == build_flavor::BuildFlavor::NightlyV1 && (build_flavor::version_query(&argv) || launch_profile::version_query(&argv)) {
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stdout(), "{}", build_flavor::version(build_flavor::COMPILED));
+        return None;
+    }
+    let nightly_build = build_flavor::COMPILED == build_flavor::BuildFlavor::NightlyV1;
+    let early = launch_profile::parse_startup(argv, std::env::var_os(launch_profile::ROOT_ENV), nightly_build)
+        .and_then(|launch| {
+            build_flavor::require_profile(build_flavor::COMPILED, &launch.profile)?;
+            initialize_nightly_process_identity().map_err(|error| error.to_string())?;
+            Ok(launch)
+        })
+        .and_then(|launch| {
+            launch_profile::prepare(launch, |root| launch_profile::validate_root(root, |key| std::env::var_os(key), std::env::current_exe().ok().as_deref()))
+        })
+        .unwrap_or_else(|error| {
+            report_launch_profile_error(&error);
+            std::process::exit(2)
+        });
+    let identity = if early.profile.is_nightly() { LaunchIdentity::NightlyV1 } else { LaunchIdentity::Stable };
+    if let Err(error) = launch_profile::install(early.profile).and_then(|()| os_window::select_identity(identity)) {
+        report_launch_profile_error(&error);
+        std::process::exit(2);
+    }
+    if let Profile::NightlyV1(root) = launch_profile::current() {
+        // Every data folder follows the profile before the first one is used.
+        texturecraft_ui_egui::set_data_root(root.clone());
+        texturecraft_ui_egui::os_window::set_display_version(build_flavor::BUILT_VERSION.to_owned());
+    }
+    Some(early.args)
+}
+
+/// The launch arguments as text. A Nightly protocol argument is a path the app opens, so a value
+/// that is not valid Unicode is refused rather than silently replaced.
+fn launch_arguments(arguments: Vec<OsString>) -> Result<Vec<String>, String> {
+    arguments.into_iter().map(|value| value.into_string().map_err(|_| "an argument is not valid Unicode".to_string())).collect()
+}
+
 fn main() {
-    // Windows: the update helper is a copy of this program started with `--finish-update`
+    // Windows: the update helper is a copy of this program started with `--finish-update`. A
+    // Nightly install is updated by ArtCraft Launcher, so it never installs an update itself.
     #[cfg(windows)]
-    if let Some(result) = craft_update::self_update::finish(&texturecraft_ui_egui::UPDATE_APP, &std::env::args_os().skip(1).collect::<Vec<_>>()) {
+    if build_flavor::COMPILED == build_flavor::BuildFlavor::Stable
+        && let Some(result) = craft_update::self_update::finish(&texturecraft_ui_egui::UPDATE_APP, &std::env::args_os().skip(1).collect::<Vec<_>>())
+    {
         std::process::exit(i32::from(result.is_err()));
     }
 
-    // Windows: the eyedropper's pointer keeper (screen_pick) is a copy of this program started with its own argument
+    // Windows: the eyedropper's pointer keeper (screen_pick) is a copy of this program started with
+    // its own argument. It reads no user state and is started without the profile tokens, so it
+    // runs before the launch protocol would refuse it.
     #[cfg(windows)]
     if std::env::args_os().nth(1).is_some_and(|arg| arg == texturecraft_ui_egui::screen_pick::KEEPER_ARG) {
         std::process::exit(texturecraft_ui_egui::screen_pick::keep_pointer());
     }
 
-    let args = match parse_args() {
+    let Some(arguments) = prepare_launch() else { return };
+    let nightly = launch_profile::current().is_nightly();
+    let args = match launch_arguments(arguments).and_then(|values| parse_args_from(values)) {
         Ok(Some(a)) => a,
         Ok(None) => return,
         Err(e) => {
@@ -222,6 +338,12 @@ fn main() {
             std::process::exit(2);
         }
     };
+    // The control server is a stable-install service: a Nightly window is driven by the Launcher,
+    // and its token file would sit in the shared temp folder rather than its private profile.
+    if nightly && args.control.is_some() {
+        eprintln!("texturecraft: TextureCraft Nightly cannot start a control server (--control); use the stable app or texturecraft-cli");
+        std::process::exit(2);
+    }
 
     // Errors before the window opens speak the system's language; the app then applies the saved one
     texturecraft_ui_egui::i18n::set_language(texturecraft_ui_egui::i18n::os_language());
@@ -235,9 +357,11 @@ fn main() {
     // Scripted runs use temporary files so they cannot overwrite saved settings
     let no_prefs_path =
         std::env::var_os("TEXTURECRAFT_NO_PREFS").map(|_| std::env::temp_dir().join(format!("texturecraft-noprefs-{}.ron", std::process::id())));
-    let persistence_path = no_prefs_path
-        .clone()
-        .or_else(|| std::env::var_os("TEXTURECRAFT_DATA_DIR").filter(|v| !v.is_empty()).map(|dir| std::path::PathBuf::from(dir).join("app.ron")));
+    let persistence_path = no_prefs_path.clone().or_else(|| {
+        launch_profile::current().root().map(|root| root.join("app.ron")).or_else(|| {
+            std::env::var_os(launch_profile::ROOT_ENV).filter(|v| !v.is_empty()).map(|dir| std::path::PathBuf::from(dir).join("app.ron"))
+        })
+    });
     let ui_file = no_prefs_path.as_ref().map(|path| path.with_extension("json")).or_else(|| storage_dir().map(|folder| folder.join("ui.json")));
     if let Some(file) = &ui_file {
         let _ = ui_state_store::FILE.set(file.clone());
@@ -249,7 +373,11 @@ fn main() {
     prefs.apply_resource_limits();
     let session = initial_session(&args);
     let title_bar = TitleBar::decide(prefs.system_title_bar);
-    let mut viewport = egui::ViewportBuilder::default().with_title(APP_NAME).with_inner_size(DEFAULT_SIZE).with_min_inner_size(MIN_SIZE);
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_app_id(os_window::app_id())
+        .with_title(os_window::name())
+        .with_inner_size(DEFAULT_SIZE)
+        .with_min_inner_size(MIN_SIZE);
     if let Some(i) = icon() {
         viewport = viewport.with_icon(i);
     }
@@ -260,8 +388,34 @@ fn main() {
         std::process::exit(2);
     }
     let control = args.control;
+    // The Nightly session record: one owner per profile, an unclean exit reported by the next
+    // start, and no document name, path or diagnostic payload collected.
+    let (nightly_session, session_health_warning) = match nightly_session::Session::begin_with_health(
+        launch_profile::current().root(),
+        build_flavor::BUILT_VERSION,
+        Some(env!("TEXTURECRAFT_BUILD_SHA")),
+    ) {
+        Ok(state) => state,
+        Err(error) => {
+            log::warn!("Nightly session health is unavailable: {error}");
+            (None, true)
+        }
+    };
+    let previous_nightly_unclean = nightly_session.as_ref().is_some_and(nightly_session::Session::previous_unclean);
+    // Set once a window has posted the interruption notice; until then the record must survive.
+    let unclean_notice_shown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let notice_shown_in_window = unclean_notice_shown.clone();
+    let nightly_session: nightly_session::Shared = std::sync::Arc::new(std::sync::Mutex::new(nightly_session));
+    // The exit hook is the controlled return on macOS, where every quit ends the process inside
+    // AppKit's terminate and `run_native` never returns. Elsewhere the return path below finishes.
+    let finish_at_exit = {
+        let shared = nightly_session.clone();
+        let shown = unclean_notice_shown.clone();
+        move || nightly_session::finish_once(&shared, shown.load(std::sync::atomic::Ordering::Relaxed))
+    };
+    let window_name = os_window::name();
     let result = eframe::run_native(
-        APP_NAME,
+        window_name,
         options,
         Box::new(move |cc| {
             #[cfg(windows)]
@@ -271,7 +425,7 @@ fn main() {
 
             // winit's Quit ends the process without asking; this menu's asks like the close button
             #[cfg(target_os = "macos")]
-            if let Err(e) = craft_menu::mac::install_app_menu(&cc.egui_ctx, APP_NAME) {
+            if let Err(e) = craft_menu::mac::install_app_menu(&cc.egui_ctx, window_name) {
                 log::warn!("the app menu could not be installed: {e}");
             }
             let window_frame = window_frame::service(cc, matches!(title_bar, TitleBar::App(_)));
@@ -281,14 +435,21 @@ fn main() {
             if let Some(port) = control {
                 app.control = Some(control_server::start(port, cc.egui_ctx.clone()));
             }
-            Ok(Box::new(Shell {
-                app,
-                window_frame,
-                #[cfg(target_os = "macos")]
-                movable: None,
-            }))
+            if previous_nightly_unclean || session_health_warning {
+                use texturecraft_ui_egui::i18n::tr;
+                app.banner = Some(if previous_nightly_unclean {
+                    tr("The previous TextureCraft Nightly session did not finish normally. No diagnostics have been sent.")
+                } else {
+                    tr("TextureCraft Nightly could not record session health in its profile; abnormal-exit detection is unavailable.")
+                });
+                notice_shown_in_window.store(previous_nightly_unclean, std::sync::atomic::Ordering::Relaxed);
+            }
+            Ok(Box::new(Shell { app, window_frame, exit_hook: Some(Box::new(finish_at_exit)), #[cfg(target_os = "macos")] movable: None }))
         }),
     );
+    // A controlled return, including a handled startup error. On macOS a window already finished in
+    // its exit hook, so this is then a no-op.
+    nightly_session::finish_once(&nightly_session, unclean_notice_shown.load(std::sync::atomic::Ordering::Relaxed));
     if let Err(e) = result {
         fatal(&e.to_string(), true);
         std::process::exit(1);
@@ -318,7 +479,7 @@ fn fatal(msg: &str, dialog: bool) {
         let saved = log.map(|f| format!("\n\n{}", trf("Details saved to {file}", &[("file", &f.display())]))).unwrap_or_default();
         rfd::MessageDialog::new()
             .set_level(rfd::MessageLevel::Error)
-            .set_title(APP_NAME)
+            .set_title(os_window::name())
             .set_description(format!("{}\n\n{msg}{saved}", tr("TextureCraft had to close:")))
             .set_buttons(rfd::MessageButtons::Ok)
             .show();
@@ -341,6 +502,29 @@ mod tests {
         let args = parse_args_from(["--power-pref".to_string(), "low".to_string(), "--gpu".to_string(), "3080".to_string()]).unwrap().unwrap();
         assert_eq!(args.power_pref, Some(eframe::wgpu::PowerPreference::LowPower));
         assert_eq!(args.gpu.as_deref(), Some("3080"));
+    }
+
+    #[test]
+    fn a_file_after_the_delimiter_is_a_file_even_when_it_looks_like_an_option() {
+        let args = parse_args_from(["--".to_string(), "--version".to_string()]).unwrap().unwrap();
+        assert_eq!(args.file.as_deref(), Some("--version"));
+        let args = parse_args_from(["--".to_string(), "--launch-profile".to_string()]).unwrap().unwrap();
+        assert_eq!(args.file.as_deref(), Some("--launch-profile"));
+        // Options before the delimiter still parse as options.
+        let args = parse_args_from(["--gpu".to_string(), "nvidia".to_string(), "--".to_string(), "a.glb".to_string()]).unwrap().unwrap();
+        assert_eq!((args.gpu.as_deref(), args.file.as_deref()), (Some("nvidia"), Some("a.glb")));
+        // One window opens one project.
+        assert!(parse_args_from(["--".to_string(), "a.glb".to_string(), "b.glb".to_string()]).is_err());
+    }
+
+    #[test]
+    fn launch_arguments_refuse_a_name_that_is_not_unicode() {
+        assert_eq!(launch_arguments(vec![OsString::from("--version")]).unwrap(), vec!["--version".to_string()]);
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt as _;
+            assert!(launch_arguments(vec![OsString::from_vec(vec![b'a', 0xff, b'b'])]).is_err());
+        }
     }
 
     #[test]
@@ -423,6 +607,7 @@ mod tests {
         let mut harness = builder.build_eframe(|cc| Shell {
             app: TextureCraftApp::new(cc, session),
             window_frame: None,
+            exit_hook: None,
             #[cfg(target_os = "macos")]
             movable: None,
         });

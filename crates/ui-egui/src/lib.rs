@@ -89,6 +89,8 @@ mod orb_environment;
 mod orb_material;
 pub mod orb_previews;
 mod orb_shape;
+/// The channel's OS identity (app id, window and app names) — see its module docs.
+pub mod os_window;
 pub mod parity;
 mod past_end;
 mod path_hit;
@@ -1216,6 +1218,26 @@ impl eframe::App for TextureCraftApp {
 #[cfg(not(target_arch = "wasm32"))]
 static DATA_FOLDER: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
 
+/// A private Nightly profile's data folder, fixed before the first window (unset: stable's
+/// Settings folder or the default). Every user folder this app writes — logs, autosave, smart
+/// materials, layouts, templates, brushes and export presets — hangs off [`data_dir`], so a
+/// Nightly install keeps all of it beside its own settings and never reads Stable's.
+#[cfg(not(target_arch = "wasm32"))]
+static DATA_ROOT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// Use `root` as the data folder for this process; called once, before the first window, by a
+/// Nightly launch with its validated profile. The Settings › Data folder value is not consulted.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn set_data_root(root: std::path::PathBuf) {
+    let _ = DATA_ROOT.set(root);
+}
+
+/// Whether this process runs from a private Nightly profile.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn has_data_root() -> bool {
+    DATA_ROOT.get().is_some()
+}
+
 /// The data folder for a `Prefs::data_folder` value: that path when it is absolute, otherwise
 /// `Documents/TextureCraft` in the user's home folder.
 #[cfg(not(target_arch = "wasm32"))]
@@ -1228,9 +1250,12 @@ pub fn data_folder(pref: &str) -> std::path::PathBuf {
     std::path::Path::new(&home).join("Documents").join("TextureCraft")
 }
 
-/// The data folder in use (Settings › Folders › Data folder).
+/// The data folder in use: the Nightly profile when this is one, else Settings › Folders › Data folder.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn data_dir() -> std::path::PathBuf {
+    if let Some(root) = DATA_ROOT.get() {
+        return root.clone();
+    }
     DATA_FOLDER.get().cloned().unwrap_or_else(|| data_folder(""))
 }
 

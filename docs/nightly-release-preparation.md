@@ -90,3 +90,30 @@ those values in the same reviewed change that promotes the policy to `release`.
   `cancel-in-progress: false`, `queue: max`).
 - `.github/nightly-signing-policy.json` matches the v3 schema, repository identity, platform
   trust anchors, CI workflow trigger contract, and SonarCloud project identity.
+
+
+## App-side producer scripts (Windows and macOS)
+
+The producer's Windows and macOS legs run scripts this repository owns. Their inputs are the four
+`TEXTURECRAFT_*` values the feed prepares (channel, exact version, commit, original run date), an
+absolute `CARGO_TARGET_DIR` and `DIST`, and optionally `CRAFT_FONTS_DIR` with
+`CRAFT_FONTS_REQUIRED=1`:
+
+| Platform | Compile step (no secrets) | Trusted signer step (release checkout) |
+|---|---|---|
+| Windows x86_64 | `pwsh packaging/windows/package.ps1 -Arch x64 -Nightly -BuildOnly` (through `nightly.ps1`) | `pwsh packaging/windows/sign.ps1 -Required` |
+| macOS aarch64 | `bash packaging/macos/nightly.sh --arch aarch64` | `bash packaging/macos/nightly-sign.sh`, then `nightly-verify.sh --expect signed --team` in a job without secrets |
+
+Both compile steps refuse every signing variable before Cargo runs
+(`sign.ps1 -CheckBuildEnvironment`, `nightly_refuse_signing_env`), require the prepared commit to
+be the checked-out one and the tree clean, and refuse `-SkipBuild`/an existing output. The
+archives are GUI only: `texturecraft.exe` plus notices on Windows, `TextureCraft Nightly.app` on
+macOS. The app-side surface — the build channel, the launch profile, the data root and the
+fences — is described in the PR that adds it; the installed policy above is unchanged by it.
+
+Local checks with no compiler, macOS or network: `python3 packaging/nightly-tests.py` (the plist,
+release-dispatch and macOS signing suites, plus the Nightly icons must be byte-identical to what
+`packaging/nightly-icons.py` derives), `packaging/windows/nightly-package-tests.ps1` and
+`nightly-signing-tests.ps1` (Windows, with `-FixtureRoot`), and `bash -n` plus shellcheck over the
+three macOS scripts. The full-ci macOS job (`nightly-macos.yml`) is the only place the bundle and
+its version query actually run before the first supervised release.

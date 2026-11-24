@@ -22,12 +22,19 @@ impl Default for Runtime {
 impl TextureCraftApp {
     /// Whether the app asks for a newer release when it starts (off until the desktop app turns it on).
     pub fn set_startup_update_check(&mut self, on: bool) {
-        self.updates_rt.startup_check = on;
+        // A Nightly install is updated by ArtCraft Launcher with the rest of the suite, never by
+        // the app: an in-app update would replace a copy the Launcher believes it manages.
+        self.updates_rt.startup_check = on && crate::os_window::stable_services_allowed();
     }
 }
 
-/// Help > Check for Updates: the next frame starts a check that reports its outcome.
+/// Help > Check for Updates: the next frame starts a check that reports its outcome. In a Nightly
+/// build the Launcher owns updates, so it says so instead of checking.
 pub(crate) fn request_check(app: &mut TextureCraftApp, ctx: &egui::Context) {
+    if !crate::os_window::stable_services_allowed() {
+        app.toast(crate::i18n::tr("TextureCraft Nightly is updated by ArtCraft Launcher."), false);
+        return;
+    }
     app.updates_rt.check_requested = true;
     ctx.request_repaint();
 }
@@ -45,6 +52,9 @@ fn holds_keyboard(status: &Status, prompt_open: bool) -> bool {
 }
 
 pub(crate) fn tick(app: &mut TextureCraftApp, ctx: &egui::Context) {
+    if !crate::os_window::stable_services_allowed() {
+        return;
+    }
     let rt = &mut app.updates_rt;
     if std::mem::take(&mut rt.check_requested) {
         rt.updater.check_now(ctx);
