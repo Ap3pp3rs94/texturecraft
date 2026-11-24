@@ -32,6 +32,7 @@ fn main() {
         "TEXTURECRAFT_BUILD_DATE",
         "TEXTURECRAFT_BUILD_CHANNEL",
         "TEXTURECRAFT_VERSION",
+        "TEXTURECRAFT_OVERRIDE_VERSION",
         "TEXTURECRAFT_REQUIRE_WINRES",
         "SOURCE_DATE_EPOCH",
     ] {
@@ -50,11 +51,17 @@ fn main() {
             std::process::exit(1);
         }
     };
+    // `TEXTURECRAFT_VERSION` is the feed identity the workflow exports; the packaging scripts
+    // (packaging/env.sh, nightly-common.sh, linux/package.sh) spell the same value
+    // `TEXTURECRAFT_OVERRIDE_VERSION`, so both name the version the binary reports.
+    let requested = ["TEXTURECRAFT_VERSION", "TEXTURECRAFT_OVERRIDE_VERSION"]
+        .into_iter()
+        .find_map(|name| std::env::var(name).ok().map(|value| value.trim().to_owned()).filter(|value| !value.is_empty()));
     let built_version = if nightly {
-        match std::env::var("TEXTURECRAFT_VERSION") {
-            Ok(version) if build_channel::is_nightly_version(&version) => version,
+        match requested {
+            Some(version) if build_channel::is_nightly_version(&version) => version,
             _ => {
-                eprintln!("nightly-v1 requires an explicit TEXTURECRAFT_VERSION feed identity");
+                eprintln!("nightly-v1 requires an explicit prepared feed identity in TEXTURECRAFT_VERSION");
                 std::process::exit(1);
             }
         }

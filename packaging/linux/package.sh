@@ -103,12 +103,17 @@ has() { case " $FORMATS " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 if has tar; then
   mkdir -p "$WORK/tar"
   cp -R "$STAGE/usr" "$WORK/tar/$BASENAME"
+  if [[ "$IS_NIGHTLY" = 1 ]]; then
+    # A Nightly binary only starts with its private profile, so an unpacked tarball gets the same
+    # launcher the other Nightly formats install: `texturecraft` starts `texturecraft-bin`.
+    mv "$WORK/tar/$BASENAME/bin/texturecraft" "$WORK/tar/$BASENAME/bin/texturecraft-bin"
+    install -Dm755 "$HERE/nightly-launch.sh" "$WORK/tar/$BASENAME/bin/texturecraft"
+  fi
   tar -C "$WORK/tar" -czf "$DIST/$BASENAME.tar.gz" "$BASENAME"
   echo "wrote $DIST/$BASENAME.tar.gz"
 fi
 
 # The Arch handoff keeps the same basename as the plain tarball in a separate directory.
-# Flatpak, OCI and direct tar consumers still get the original binary, not this launcher.
 if [[ -n "$ARCH_TAR_DIR" ]]; then
   mkdir -p "$ARCH_TAR_DIR"
   if [[ "$(cd "$ARCH_TAR_DIR" && pwd -P)" == "$(cd "$DIST" && pwd -P)" ]]; then
@@ -138,11 +143,16 @@ if has deb || has rpm; then
     install -Dm755 "$NFPM_STAGE/usr/bin/texturecraft" "$NFPM_STAGE/usr/lib/texturecraft-nightly/texturecraft"
     cat >"$NFPM_STAGE/usr/bin/$NFPM_BIN" <<'WRAPPER'
 #!/bin/sh
+# TextureCraft Nightly: the GUI runs with the Launcher's private profile, which holds every
+# per-user file (settings, ui.json, logs, autosaves, materials, layouts, templates, presets).
 set -eu
-if [ -z "${TEXTURECRAFT_DATA_DIR:-}" ]; then
-  export TEXTURECRAFT_DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/TextureCraft-Nightly"
-fi
-exec /usr/lib/texturecraft-nightly/texturecraft "$@"
+bin=/usr/lib/texturecraft-nightly/texturecraft
+profile="${XDG_DATA_HOME:-${HOME:-}/.local/share}/TextureCraft-Nightly"
+# The Launcher's protocol, and a bare version query, pass through untouched.
+case "${1-}" in
+  --launch-profile | --profile-root | --version | -V) exec "$bin" "$@" ;;
+esac
+exec "$bin" --launch-profile nightly-v1 --profile-root "$profile" -- "$@"
 WRAPPER
     chmod 755 "$NFPM_STAGE/usr/bin/$NFPM_BIN"
     rm -f "$NFPM_STAGE/usr/bin/texturecraft"
@@ -155,11 +165,14 @@ WRAPPER
         -e '/^MimeType=/d' \
         "$NFPM_STAGE/usr/share/applications/$APP_ID.desktop" >"$NFPM_STAGE/usr/share/applications/$NIGHTLY_DESK_ID.desktop"
     rm -f "$NFPM_STAGE/usr/share/applications/$APP_ID.desktop"
+    # The Nightly entry claims no MIME types (stable keeps the associations), so the metainfo must
+    # not advertise them either.
     sed -e "s|<id>$APP_ID</id>|<id>$NIGHTLY_DESK_ID</id>|g" \
         -e "s|<name>TextureCraft</name>|<name>TextureCraft Nightly</name>|g" \
         -e "s|<launchable type=\"desktop-id\">$APP_ID.desktop</launchable>|<launchable type=\"desktop-id\">$NIGHTLY_DESK_ID.desktop</launchable>|g" \
         -e "s|<icon type=\"stock\">$APP_ID</icon>|<icon type=\"stock\">$NIGHTLY_DESK_ID</icon>|g" \
         -e "s|<binary>texturecraft</binary>|<binary>$NFPM_BIN</binary>|g" \
+        -e '/<mediatype>/d' \
         "$NFPM_STAGE/usr/share/metainfo/$APP_ID.metainfo.xml" >"$NFPM_STAGE/usr/share/metainfo/$NIGHTLY_DESK_ID.metainfo.xml"
     rm -f "$NFPM_STAGE/usr/share/metainfo/$APP_ID.metainfo.xml"
     rm -rf "$NFPM_STAGE/usr/share/mime"
@@ -192,10 +205,17 @@ if has appimage; then
   install -Dm755 "$HERE/AppRun" "$APPDIR/AppRun"
   if [[ "$IS_NIGHTLY" = 1 ]]; then
     APPIMAGE_ID="$APP_ID.nightly-v1"
+    # The desktop id and the channel line: a Nightly AppImage must start the app with the
+    # Launcher's private profile, not with stable's folders (AppRun's tail does the exec).
     awk -v old_id="$APP_ID" -v new_id="$APPIMAGE_ID" '
       $0 == "DESK_ID=" old_id { print "DESK_ID=" new_id; next }
+      $0 == "CHANNEL=stable" { print "CHANNEL=nightly-v1"; next }
       { print }
     ' "$APPDIR/AppRun" >"$APPDIR/AppRun.tmp"
+    grep -qx 'CHANNEL=nightly-v1' "$APPDIR/AppRun.tmp" || {
+      echo "error: AppRun has no CHANNEL=stable line to switch for Nightly" >&2
+      exit 1
+    }
     mv "$APPDIR/AppRun.tmp" "$APPDIR/AppRun"
     chmod 755 "$APPDIR/AppRun"
     sed -e "s|^Icon=$APP_ID$|Icon=$APPIMAGE_ID|" \

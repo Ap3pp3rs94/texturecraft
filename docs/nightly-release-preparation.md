@@ -94,6 +94,14 @@ those values in the same reviewed change that promotes the policy to `release`.
 
 ## App-side producer scripts (Windows and macOS)
 
+**Every Linux Nightly format starts the app the flavor's way.** The `.deb`/`.rpm` wrapper, the
+Arch launcher, the Flatpak wrapper, the AppImage's `AppRun` and the launcher inside the plain
+`nightly.tar.gz` all exec the real GUI with the literal
+`--launch-profile nightly-v1 --profile-root <${XDG_DATA_HOME:-~/.local/share}/TextureCraft-Nightly> --`,
+and pass a Launcher protocol or a `--version`/`-V` query through untouched (so the smoke checks and
+`texturecraft-nightly --version` still answer). The profile is outside stable's folders and outside
+the unpacked or installed copy, which the flavor's fence would otherwise refuse.
+
 The producer's Windows and macOS legs run scripts this repository owns. Their inputs are the four
 `TEXTURECRAFT_*` values the feed prepares (channel, exact version, commit, original run date), an
 absolute `CARGO_TARGET_DIR` and `DIST`, and optionally `CRAFT_FONTS_DIR` with

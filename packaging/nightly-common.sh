@@ -44,7 +44,8 @@ nightly_build_gui() {
   nightly_compile_gui
   local actual
   actual="$("$NIGHTLY_GUI" --version)" || nightly_die 'side-effect-free nightly version verification failed'
-  [[ "$actual" == "TextureCraft "* ]] || nightly_die 'the built version/flavor is not the prepared identity'
+  # Exactly what the flavor prints: the prepared version and its channel (build_flavor::version).
+  [[ "$actual" == "TextureCraft $VERSION (nightly-v1)" ]] || nightly_die "the built binary reports '$actual', not TextureCraft $VERSION (nightly-v1)"
   [[ "$(git -C "$ROOT" rev-parse HEAD)" == "$TEXTURECRAFT_BUILD_SHA" && -z "$(git -C "$ROOT" status --porcelain)" ]] || nightly_die 'source changed during the version query'
 }
 

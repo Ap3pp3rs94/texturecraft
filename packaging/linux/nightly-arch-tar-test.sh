@@ -31,19 +31,29 @@ mv "$bin/texturecraft-cli" "$bin/texturecraft-nightly-cli"
 test ! -e "$stage/bin/.texturecraft-nightly"
 cmp "$stage/bin/texturecraft" "$bin/.texturecraft-nightly/texturecraft"
 cmp "$stage/bin/texturecraft-cli" "$bin/texturecraft-nightly-cli"
-expect() {
-  expected="$1"
-  shift
+profile="${XDG_DATA_HOME:-${HOME:-}/.local/share}/TextureCraft-Nightly"
+# A launch adds the Launcher's literal selector/root pair and the file delimiter; a version query or
+# an already-formed protocol passes through untouched.
+expect_launch() {
+  expected="$(printf '<%s>\n' --launch-profile nightly-v1 --profile-root "$profile" -- "$@")"
   actual=$(PATH="$bin:$PATH" texturecraft-nightly "$@")
-  if [[ "$actual" != "$expected" ]]; then
+  [[ "$actual" == "$expected" ]] || {
     printf 'expected:\n%s\nactual:\n%s\n' "$expected" "$actual" >&2
     exit 1
-  fi
+  }
 }
-expect '<>'
-expect "$(printf '<%s>\n' 'mesh with spaces.glb' '--other-name.tcraft')" \
-  'mesh with spaces.glb' '--other-name.tcraft'
-expect '<--version>' --version
-expect '<-V>' -V
+expect_forwarded() {
+  expected="$(printf '<%s>\n' "$@")"
+  actual=$(PATH="$bin:$PATH" texturecraft-nightly "$@")
+  [[ "$actual" == "$expected" ]] || {
+    printf 'expected:\n%s\nactual:\n%s\n' "$expected" "$actual" >&2
+    exit 1
+  }
+}
+expect_launch
+expect_launch 'mesh with spaces.glb' '--other-name.tcraft'
+expect_forwarded --version
+expect_forwarded -V
+expect_forwarded --launch-profile nightly-v1 --profile-root /launcher/profile --version
 
-echo "PASS: Arch Nightly handoff preserves binary layout and launch arguments"
+echo "PASS: Arch Nightly handoff preserves binary layout and passes the Launcher profile"

@@ -63,11 +63,25 @@ mkdir -p "$WORK/stage"
 tar -xzf "$TARBALL" -C "$WORK/stage" --strip-components=1
 [[ -x "$WORK/stage/bin/texturecraft" ]] || { echo "error: $TARBALL has no bin/texturecraft" >&2; exit 1; }
 if [[ "$FLATPAK_ID" != "$APP_ID" ]]; then
-  mv "$WORK/stage/bin/texturecraft" "$WORK/stage/bin/texturecraft-bin"
+  # A Nightly tarball from package.sh already separates the launcher from the GUI; an older one
+  # does not. Either way this bundle installs its own wrapper and the GUI in /app/libexec.
+  if [[ -e "$WORK/stage/bin/texturecraft-bin" ]]; then
+    rm -f "$WORK/stage/bin/texturecraft"
+  else
+    mv "$WORK/stage/bin/texturecraft" "$WORK/stage/bin/texturecraft-bin"
+  fi
   cat >"$WORK/stage/bin/texturecraft" <<'WRAPPER'
 #!/bin/sh
+# TextureCraft Nightly: the GUI runs with the Launcher's private profile. Inside the sandbox
+# $XDG_DATA_HOME is the app's own per-app folder, so the profile never meets stable's.
 set -eu
-exec /app/libexec/texturecraft "$@"
+bin=/app/libexec/texturecraft
+profile="${XDG_DATA_HOME:-${HOME:-}/.local/share}/TextureCraft-Nightly"
+# The Launcher's protocol, and a bare version query, pass through untouched.
+case "${1-}" in
+  --launch-profile | --profile-root | --version | -V) exec "$bin" "$@" ;;
+esac
+exec "$bin" --launch-profile nightly-v1 --profile-root "$profile" -- "$@"
 WRAPPER
   chmod 755 "$WORK/stage/bin/texturecraft"
   sed -e "s|^Icon=$APP_ID$|Icon=$FLATPAK_ID|" \

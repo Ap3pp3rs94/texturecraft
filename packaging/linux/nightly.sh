@@ -18,7 +18,13 @@ OUTPUT="$DIST/texturecraft-$VERSION-linux-x86_64-nightly.tar.gz"
 nightly_build_gui
 STAGE="$NIGHTLY_WORK/stage"
 mkdir -p "$STAGE"
-cp "$NIGHTLY_GUI" "$STAGE/texturecraft"
+# The launcher is the entry point (`texturecraft`); the GUI sits beside it and is started with the
+# Launcher's private profile, so an unpacked tarball never writes stable's folders. The flat layout
+# is what nightly-archive.py allows, and the launcher is a committed script so shellcheck covers
+# it like every other shell script.
+cp "$NIGHTLY_GUI" "$STAGE/texturecraft-bin"
+chmod 755 "$STAGE/texturecraft-bin"
+cp "$ROOT/packaging/linux/nightly-launch.sh" "$STAGE/texturecraft"
 chmod 755 "$STAGE/texturecraft"
 cp "$ROOT/assets/app-icon/texturecraft-1024.png" "$STAGE/texturecraft-nightly.png"
 nightly_copy_notices "$STAGE"
