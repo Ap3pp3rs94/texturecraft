@@ -201,6 +201,12 @@ if has appimage; then
         "$APPDIR/usr/share/applications/$APP_ID.desktop" >"$APPDIR/usr/share/applications/$APPIMAGE_ID.desktop"
     rm -f "$APPDIR/usr/share/applications/$APP_ID.desktop"
     cp "$APPDIR/usr/share/applications/$APPIMAGE_ID.desktop" "$APPDIR/$APPIMAGE_ID.desktop"
+    sed -e "s|<id>$APP_ID</id>|<id>$APPIMAGE_ID</id>|g" \
+        -e "s|<name>TextureCraft</name>|<name>TextureCraft Nightly</name>|g" \
+        -e "s|<launchable type=\"desktop-id\">$APP_ID.desktop</launchable>|<launchable type=\"desktop-id\">$APPIMAGE_ID.desktop</launchable>|g" \
+        -e "s|<icon type=\"stock\">$APP_ID</icon>|<icon type=\"stock\">$APPIMAGE_ID</icon>|g" \
+        "$APPDIR/usr/share/metainfo/$APP_ID.metainfo.xml" >"$APPDIR/usr/share/metainfo/$APPIMAGE_ID.metainfo.xml"
+    rm -f "$APPDIR/usr/share/metainfo/$APP_ID.metainfo.xml"
     rm -rf "$APPDIR/usr/share/icons/hicolor"
     install -Dm644 "$NIGHTLY_ICON" \
       "$APPDIR/usr/share/icons/hicolor/256x256/apps/$APPIMAGE_ID.png"
@@ -238,8 +244,12 @@ if has appimage; then
     UPDATE_ARGS=(-u "$UPDATE_INFO")
   else
     # Nightly releases are GitHub pre-releases (`latest` only selects stable releases), so point
-    # zsync update metadata at pre-release tags matching `-nightly` rather than stable `latest`.
-    UPDATE_INFO="gh-releases-zsync|${REPO%%/*}|${REPO#*/}|latest-pre|texturecraft-*-nightly*-linux-$ARCH.AppImage.zsync"
+    # zsync update metadata at pre-release tags rather than stable `latest`.
+    if [[ "$VERSION" == *-nightly* ]]; then
+      UPDATE_INFO="gh-releases-zsync|${REPO%%/*}|${REPO#*/}|latest-pre|texturecraft-*-nightly*-linux-$ARCH.AppImage.zsync"
+    else
+      UPDATE_INFO="gh-releases-zsync|${REPO%%/*}|${REPO#*/}|latest-pre|texturecraft-*-linux-$ARCH.AppImage.zsync"
+    fi
     UPDATE_ARGS=(-u "$UPDATE_INFO")
   fi
   # Extract-and-run: works without FUSE (containers, CI). The output embeds the static runtime,

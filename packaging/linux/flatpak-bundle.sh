@@ -82,7 +82,7 @@ WRAPPER
       -e "s|<icon type=\"stock\">$APP_ID</icon>|<icon type=\"stock\">$FLATPAK_ID</icon>|g" \
       "$WORK/stage/share/metainfo/$APP_ID.metainfo.xml" >"$WORK/stage/share/metainfo/$FLATPAK_ID.metainfo.xml"
   rm -f "$WORK/stage/share/metainfo/$APP_ID.metainfo.xml"
-  mv "$WORK/stage/share/mime/packages/$APP_ID.xml" "$WORK/stage/share/mime/packages/$FLATPAK_ID.xml"
+  rm -rf "$WORK/stage/share/mime"
   rm -rf "$WORK/stage/share/icons/hicolor"
   NIGHTLY_ICON="$ROOT/assets/app-icon/texturecraft-nightly.png"
   if [[ ! -f "$NIGHTLY_ICON" ]]; then
@@ -90,7 +90,11 @@ WRAPPER
   fi
   install -Dm644 "$NIGHTLY_ICON" \
     "$WORK/stage/share/icons/hicolor/256x256/apps/$FLATPAK_ID.png"
+  # Omit conflicting MIME registrations and disable host Flatpak updater talk-name until
+  # craft_update supports the nightly FLATPAK_ID.
   sed -e "s|ai\.storyteller\.texturecraft|$FLATPAK_ID|g" \
+      -e '/share\/mime\/packages\//d' \
+      -e '/--talk-name=org\.freedesktop\.Flatpak/d' \
       -e 's|- install -Dm755 bin/texturecraft /app/bin/texturecraft|- install -Dm755 bin/texturecraft-bin /app/libexec/texturecraft\n      - install -Dm755 bin/texturecraft /app/bin/texturecraft|' \
       "$HERE/flatpak/ai.storyteller.TextureCraft.bundle.yml" >"$WORK/$FLATPAK_ID.yml"
 else
@@ -126,7 +130,11 @@ if [[ "$TEST" = 1 ]]; then
   flatpak install --user -y --noninteractive --reinstall "$OUT"
   flatpak info --user "$FLATPAK_ID"
   flatpak run --command=texturecraft-cli "$FLATPAK_ID" --version
-  flatpak run --command=sh "$FLATPAK_ID" -c 'ls /app/share/applications /app/share/metainfo /app/share/mime/packages /app/share/icons/hicolor/*/apps'
+  if [[ "$FLATPAK_ID" == "$APP_ID" ]]; then
+    flatpak run --command=sh "$FLATPAK_ID" -c 'ls /app/share/applications /app/share/metainfo /app/share/mime/packages /app/share/icons/hicolor/*/apps'
+  else
+    flatpak run --command=sh "$FLATPAK_ID" -c 'ls /app/share/applications /app/share/metainfo /app/share/icons/hicolor/*/apps && test ! -e /app/share/mime/packages'
+  fi
 fi
 echo "==> done"
 ls -lh "$OUT"
