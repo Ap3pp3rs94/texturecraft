@@ -98,3 +98,30 @@ fn malformed_utf8_catalogs_and_invalid_rows_fail_during_generation() {
         }
     }
 }
+
+#[test]
+fn the_catalog_characters_are_the_ones_the_web_font_keeps() {
+    let fixture = Fixture::new();
+    std::fs::write(fixture.0.join("locales/es/texturecraft.tsv"), "\tLayers\tCapas\n").unwrap();
+    std::fs::write(fixture.0.join("locales/es/common.tsv"), "\tSave\tGuardar\n").unwrap();
+    std::fs::create_dir_all(fixture.0.join("locales/ja")).unwrap();
+    std::fs::write(fixture.0.join("locales/ja/texturecraft.tsv"), "\tLayers\t\u{30ec}\u{30a4}\u{30e4}\u{30fc}\n").unwrap();
+    // A shared-only locale contributes no characters: its catalog is not embedded.
+    std::fs::create_dir_all(fixture.0.join("locales/de")).unwrap();
+    std::fs::write(fixture.0.join("locales/de/common.tsv"), "\tSave\tSpeichern \u{fc}\n").unwrap();
+
+    let (source, characters) = i18n_build::collect(Some(&fixture.0), true).unwrap();
+    assert!(source.contains("texturecraft.tsv"));
+    for used in ['L', 'a', 'y', 'e', 'r', 's', 'C', 'p', 'G', 'u', 'd', '\u{30ec}', '\u{30a4}', '\u{30e4}', '\u{30fc}'] {
+        assert!(characters.contains(&used), "missing {used:?}");
+    }
+    assert!(!characters.contains(&'\u{fc}'), "the shared-only de catalog is not embedded");
+    let mut sorted = characters.clone();
+    sorted.sort_unstable();
+    sorted.dedup();
+    assert_eq!(sorted, characters, "sorted and distinct");
+
+    // Nothing to cut with no checkout: the web build then keeps the faces whole.
+    assert_eq!(i18n_build::collect(None, false).unwrap().1, Vec::<char>::new());
+    assert!(i18n_build::collect(None, true).is_err());
+}
