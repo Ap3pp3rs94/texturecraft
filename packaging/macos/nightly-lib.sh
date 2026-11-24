@@ -6,6 +6,9 @@
 MAC_NIGHTLY_APP='TextureCraft Nightly.app'
 MAC_NIGHTLY_ID='ai.storyteller.texturecraft.nightly'
 MAC_NIGHTLY_EXECUTABLE='TextureCraft'
+# nightly.sh copies it into the bundle; the file is linted on its own, without -x, so shellcheck
+# cannot see that use.
+# shellcheck disable=SC2034
 MAC_NIGHTLY_ICON='texturecraft-nightly'
 # The release environment's names, as release.yml passes them (packaging/macos/import-cert.sh).
 MAC_NIGHTLY_SECRETS=(APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD KEYCHAIN_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID)
