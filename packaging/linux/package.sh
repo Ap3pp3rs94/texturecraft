@@ -139,13 +139,16 @@ if has deb || has rpm; then
     cat >"$NFPM_STAGE/usr/bin/$NFPM_BIN" <<'WRAPPER'
 #!/bin/sh
 set -eu
+if [ -z "${TEXTURECRAFT_DATA_DIR:-}" ]; then
+  export TEXTURECRAFT_DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/TextureCraft-Nightly"
+fi
 exec /usr/lib/texturecraft-nightly/texturecraft "$@"
 WRAPPER
     chmod 755 "$NFPM_STAGE/usr/bin/$NFPM_BIN"
     rm -f "$NFPM_STAGE/usr/bin/texturecraft"
     mv "$NFPM_STAGE/usr/bin/texturecraft-cli" "$NFPM_STAGE/usr/bin/$NFPM_CLI"
     mv "$NFPM_STAGE/usr/share/doc/texturecraft" "$NFPM_STAGE/usr/share/doc/$NFPM_NAME"
-    sed -e "s|^Exec=texturecraft\([[:space:]]\|$\)|Exec=$NFPM_BIN\1|" \
+    sed -e "s#^Exec=texturecraft\([[:space:]]\|$\)#Exec=$NFPM_BIN\1#" \
         -e "s|^TryExec=texturecraft$|TryExec=$NFPM_BIN|" \
         -e "s|^Icon=$APP_ID$|Icon=$NIGHTLY_DESK_ID|" \
         -e "s|^Name=TextureCraft$|Name=TextureCraft Nightly|" \

@@ -134,13 +134,24 @@ fn set_taskbar_icon(w: &winit::window::Window) {
     }
 }
 
+/// Directory for saved settings, UI state, and error logs.
+///
+/// Honors `TEXTURECRAFT_DATA_DIR` (when non-empty) so nightly installs can keep
+/// their own profile separate from stable.
+fn storage_dir() -> Option<std::path::PathBuf> {
+    if let Some(dir) = std::env::var_os("TEXTURECRAFT_DATA_DIR").filter(|v| !v.is_empty()) {
+        return Some(std::path::PathBuf::from(dir));
+    }
+    eframe::storage_dir(APP_NAME)
+}
+
 /// Preferences needed before opening the initial project or window, with legacy storage fallback.
 fn saved_prefs(ui_file: Option<&std::path::Path>, persistence_path: Option<&std::path::Path>) -> texturecraft_ui_egui::state::Prefs {
     if let Some(ui) = ui_file.and_then(ui_state_store::read) {
         return ui.prefs;
     }
 
-    let file = persistence_path.map(std::path::Path::to_path_buf).or_else(|| eframe::storage_dir(APP_NAME).map(|folder| folder.join("app.ron")));
+    let file = persistence_path.map(std::path::Path::to_path_buf).or_else(|| storage_dir().map(|folder| folder.join("app.ron")));
     let saved = file.and_then(|file| std::fs::read_to_string(file).ok());
     let entries = saved.and_then(|text| ron::from_str::<std::collections::HashMap<String, String>>(&text).ok());
     entries.and_then(|entries| ron::from_str::<UiState>(entries.get("ui")?).ok()).map(|ui| ui.prefs).unwrap_or_default()
@@ -222,10 +233,12 @@ fn main() {
     }));
 
     // Scripted runs use temporary files so they cannot overwrite saved settings
-    let persistence_path =
+    let no_prefs_path =
         std::env::var_os("TEXTURECRAFT_NO_PREFS").map(|_| std::env::temp_dir().join(format!("texturecraft-noprefs-{}.ron", std::process::id())));
-    let ui_file =
-        persistence_path.as_ref().map(|path| path.with_extension("json")).or_else(|| eframe::storage_dir(APP_NAME).map(|folder| folder.join("ui.json")));
+    let persistence_path = no_prefs_path
+        .clone()
+        .or_else(|| std::env::var_os("TEXTURECRAFT_DATA_DIR").filter(|v| !v.is_empty()).map(|dir| std::path::PathBuf::from(dir).join("app.ron")));
+    let ui_file = no_prefs_path.as_ref().map(|path| path.with_extension("json")).or_else(|| storage_dir().map(|folder| folder.join("ui.json")));
     if let Some(file) = &ui_file {
         let _ = ui_state_store::FILE.set(file.clone());
     }
@@ -284,7 +297,7 @@ fn main() {
 
 /// The file startup errors and crashes are appended to, beside the saved settings.
 fn error_log() -> Option<std::path::PathBuf> {
-    eframe::storage_dir(APP_NAME).map(|d| d.join("errors.log"))
+    storage_dir().map(|d| d.join("errors.log"))
 }
 
 /// Append a line with the time (Unix seconds) and the app version; true when it was written.
