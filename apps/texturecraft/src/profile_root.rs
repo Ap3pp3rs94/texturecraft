@@ -13,6 +13,12 @@ use std::path::{Component, Path, PathBuf};
 const BRAND: &str = "TextureCraft";
 /// The bundle identifier of the stable package (macOS library folders, the Linux Flatpak).
 const STABLE_ID: &str = "ai.storyteller.texturecraft";
+/// The package id of the Nightly Flatpak bundle (`packaging/linux/flatpak-bundle.sh`). Inside that
+/// sandbox `FLATPAK_ID` is always set, so this exact id is the one a Nightly native launch accepts.
+const NIGHTLY_ID: &str = "ai.storyteller.texturecraft.nightly";
+/// eframe lowercases its folder name on Linux (`file_storage.rs`), so Stable's real settings folder
+/// is `$XDG_DATA_HOME/texturecraft`, not the capitalised `TextureCraft` the app is called.
+const LINUX_STORAGE_BRAND: &str = "texturecraft";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Platform {
@@ -122,10 +128,7 @@ fn forbidden_roots(platform: Platform, env: &impl Fn(&str) -> Option<OsString>, 
             // eframe's settings folder (`%APPDATA%\TextureCraft`), its local counterpart, and the MSI's
             // per-machine and any per-user install folders. A custom install folder is covered by the
             // executable's own folder below.
-            let mut roots = ["APPDATA", "LOCALAPPDATA"]
-                .into_iter()
-                .map(|key| required_base(env, key).map(|p| p.join(BRAND)))
-                .collect::<Result<Vec<_>, _>>()?;
+            let mut roots = ["APPDATA", "LOCALAPPDATA"].into_iter().map(|key| required_base(env, key).map(|p| p.join(BRAND))).collect::<Result<Vec<_>, _>>()?;
             roots.push(required_base(env, "LOCALAPPDATA")?.join("Programs").join("ArtCraft").join(BRAND));
             for key in ["ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"] {
                 if let Some(base) = env(key).filter(|v| !v.is_empty()) {
@@ -136,15 +139,14 @@ fn forbidden_roots(platform: Platform, env: &impl Fn(&str) -> Option<OsString>, 
         }
         Platform::Linux => {
             // The four XDG roots carry eframe's settings, caches and state under the app's name.
-            let mut roots = [
-                ("XDG_CONFIG_HOME", ".config"),
-                ("XDG_DATA_HOME", ".local/share"),
-                ("XDG_CACHE_HOME", ".cache"),
-                ("XDG_STATE_HOME", ".local/state"),
-            ]
-            .into_iter()
-            .map(|(key, fallback)| xdg_base(env, key, fallback).map(|p| p.join(BRAND)))
-            .collect::<Result<Vec<_>, _>>()?;
+            let mut roots =
+                [("XDG_CONFIG_HOME", ".config"), ("XDG_DATA_HOME", ".local/share"), ("XDG_CACHE_HOME", ".cache"), ("XDG_STATE_HOME", ".local/state")]
+                    .into_iter()
+                    .map(|(key, fallback)| xdg_base(env, key, fallback).map(|p| p.join(BRAND)))
+                    .collect::<Result<Vec<_>, _>>()?;
+            // eframe's own folder for this app on Linux, which is what holds Stable's `app.ron`,
+            // `ui.json` and `errors.log`: it folds the name, so it is the lowercase one.
+            roots.push(xdg_base(env, "XDG_DATA_HOME", ".local/share")?.join(LINUX_STORAGE_BRAND));
             roots.extend(["/usr/bin/texturecraft", "/usr/local/bin/texturecraft", "/opt/texturecraft"].map(PathBuf::from));
             // The stable Flatpak keeps its own per-app data folder.
             roots.push(required_base(env, "HOME")?.join(format!(".var/app/{STABLE_ID}")));
@@ -225,10 +227,14 @@ fn validate_for(
     writable: impl FnOnce(&Path) -> std::io::Result<()>,
 ) -> Result<PathBuf, String> {
     absolute(root.to_path_buf(), "the nightly profile root")?;
-    if platform != Platform::Windows && env("FLATPAK_ID").is_some_and(|v| !v.is_empty()) {
-        // These rows are native tar/app-bundle launches, not a Flatpak package. Inheriting its
-        // runtime namespace could point another profile at the stable app's folders.
-        return Err("nightly-v1 native packages cannot inherit a Flatpak instance; launch through the native Launcher".into());
+    // A native package must not carry another app's Flatpak namespace, and the Nightly bundle must
+    // be able to start inside its own sandbox, where the runtime always sets `FLATPAK_ID`. Its
+    // `~/.var/app/<nightly id>` sandbox is separate from stable's, so only other ids are refused.
+    if platform != Platform::Windows
+        && let Some(id) = env("FLATPAK_ID").filter(|v| !v.is_empty())
+        && id != NIGHTLY_ID
+    {
+        return Err("nightly-v1 only runs inside its own Flatpak; launch through the native Launcher or the Nightly bundle".into());
     }
     let chosen = canonical_future(root)?;
     let exe = absolute(exe.ok_or("cannot establish the installation boundary")?.to_path_buf(), "the executable")?;
@@ -337,6 +343,7 @@ mod tests {
             (Platform::Windows, home.join("Documents").join(BRAND)),
             (Platform::Linux, home.join(".config").join(BRAND)),
             (Platform::Linux, home.join(".local/share").join(BRAND)),
+            (Platform::Linux, home.join(".local/share").join(LINUX_STORAGE_BRAND)),
             (Platform::Linux, home.join(".cache").join(BRAND)),
             (Platform::Linux, home.join(".local/state").join(BRAND)),
             (Platform::Linux, home.join("Documents").join(BRAND)),
@@ -398,19 +405,31 @@ mod tests {
     }
 
     #[test]
-    fn a_flatpak_instance_may_not_carry_a_native_profile() {
+    fn only_the_nightly_flatpak_may_start_with_its_own_id() {
         let fixture = Fixture::new();
         let profile = fixture.profile("flatpak");
         assert!(fixture.check(Platform::Linux, &profile).is_ok());
         std::fs::remove_dir_all(&profile).ok();
-        let result = validate_for(
-            Platform::Linux,
-            &profile,
-            |key| if key == "FLATPAK_ID" { Some(OsString::from(STABLE_ID)) } else { fixture.get(key) },
-            Some(&fixture.exe),
-            ensure_writable,
-        );
-        assert!(result.is_err());
+        let check_with = |id: &str, candidate: &Path| {
+            let id = OsString::from(id);
+            validate_for(
+                Platform::Linux,
+                candidate,
+                |key| if key == "FLATPAK_ID" { Some(id.clone()) } else { fixture.get(key) },
+                Some(&fixture.exe),
+                ensure_writable,
+            )
+        };
+        // Stable's id, its window id and an unrelated app's id are all refusals.
+        for id in [STABLE_ID, "ai.storyteller.texturecraft.nightly-v1", "org.example.other"] {
+            assert!(check_with(id, &profile).is_err(), "{id} was accepted");
+        }
+        // The Nightly bundle's own id is the sandbox the Nightly package runs in: accepted, with the
+        // profile its wrapper names inside it (`${XDG_DATA_HOME}/TextureCraft-Nightly`).
+        let sandbox = fixture.home().join(format!(".var/app/{NIGHTLY_ID}"));
+        let sandboxed = sandbox.join(".local/share/TextureCraft-Nightly");
+        assert_eq!(check_with(NIGHTLY_ID, &sandboxed).expect("the Nightly Flatpak may start"), sandboxed);
+        std::fs::remove_dir_all(&sandbox).ok();
     }
 
     #[test]
@@ -438,10 +457,16 @@ mod tests {
         let fixture = Fixture::new();
         let profile = fixture.profile("read only");
         let reached = std::cell::Cell::new(false);
-        let result = validate_for(Platform::Linux, &profile, |key| fixture.get(key), Some(&fixture.exe), |_| {
-            reached.set(true);
-            Err(std::io::Error::other("read-only filesystem"))
-        });
+        let result = validate_for(
+            Platform::Linux,
+            &profile,
+            |key| fixture.get(key),
+            Some(&fixture.exe),
+            |_| {
+                reached.set(true);
+                Err(std::io::Error::other("read-only filesystem"))
+            },
+        );
         assert!(result.is_err());
         assert!(reached.get());
         assert!(result.unwrap_err().contains("not writable"));

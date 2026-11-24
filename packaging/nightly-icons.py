@@ -24,7 +24,6 @@ import zlib
 ROOT = Path(__file__).resolve().parent.parent
 ICONS = ROOT / "assets" / "app-icon"
 STABLE_ID = "ai.storyteller.texturecraft"
-NIGHTLY_ID = "ai.storyteller.texturecraft-nightly"
 
 # The palette the artwork is drawn in, read from the tile itself (the three colours it is made of).
 INK = (11, 11, 12)
@@ -37,8 +36,10 @@ NIGHTLY_BG = (100, 52, 24)
 RESIDUAL = 24
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 
-# Sizes the hicolor theme carries (the 256 one is also the window icon).
-HICOLOR_SIZES = (16, 24, 32, 48, 64, 128, 256, 512)
+# Sizes the Nightly set carries (the 256 one is also the window and package icon). They live in
+# `assets/app-icon/nightly/`, not in `hicolor/`: Stable's Linux and FreeBSD packagers copy that
+# whole theme tree, so Nightly renders stored under it would ship in every Stable package.
+NIGHTLY_SIZES = (16, 24, 32, 48, 64, 128, 256, 512)
 
 
 def decode_png(data):
@@ -232,21 +233,21 @@ def targets():
     assets.append((ICONS / "texturecraft-nightly.icns", write_icns([(name, png) for _kind, name, _size, png in icon_frames])))
     ico_frames = nightly_frames((ICONS / "texturecraft.ico").read_bytes())
     assets.append((ICONS / "texturecraft-nightly.ico", write_ico([(size, png) for _kind, _name, size, png in ico_frames])))
-    for size in HICOLOR_SIZES:
+    for size in NIGHTLY_SIZES:
         source = ICONS / "hicolor" / f"{size}x{size}" / "apps" / f"{STABLE_ID}.png"
         width, height, rgba = decode_png(source.read_bytes())
-        assets.append((ICONS / "hicolor" / f"{size}x{size}" / "apps" / f"{NIGHTLY_ID}.png", encode_png(width, height, recolour(rgba))))
+        assets.append((ICONS / "nightly" / f"{size}.png", encode_png(width, height, recolour(rgba))))
     width, height, rgba = decode_png((ICONS / "texturecraft-1024.png").read_bytes())
     assets.append((ICONS / "texturecraft-nightly-1024.png", encode_png(width, height, recolour(rgba))))
-    # The window icon is the same 256 render the hicolor theme carries.
-    window = ICONS / "hicolor" / "256x256" / "apps" / f"{NIGHTLY_ID}.png"
+    # The window icon is the same 256 render the Nightly set carries.
+    window = ICONS / "nightly" / "256.png"
     assets.append((ICONS / "texturecraft-nightly.png", next(data for path, data in assets if path == window)))
     return assets
 
 
 def provenance(assets):
     inputs = [ICONS / "texturecraft.icns", ICONS / "texturecraft.ico", ICONS / "texturecraft-1024.png"]
-    inputs += [ICONS / "hicolor" / f"{size}x{size}" / "apps" / f"{STABLE_ID}.png" for size in HICOLOR_SIZES]
+    inputs += [ICONS / "hicolor" / f"{size}x{size}" / "apps" / f"{STABLE_ID}.png" for size in NIGHTLY_SIZES]
     digest = lambda data: hashlib.sha256(data).hexdigest()
     return {
         "title": "TextureCraft nightly deep-background icons",
@@ -258,12 +259,12 @@ def provenance(assets):
             "kind": "derivative of the project-owned stable renders; no badge, crescent or letter",
             "original_palette": {"ink": "#0b0b0c", "paper": "#efe9dc", "background": "#c2672b"},
             "nightly_background": "#643418",
-            "transform": "Fit each pixel as the tile background plus one engraved foreground (ink or paper) and replace only the background contribution; keep alpha, padding and foreground detail. Each frame comes from the stable master of its own size: the .icns and .ico PNG frames are recoloured in place, and the hicolor PNGs and the 1024 master are recoloured from their own renders. No upscaling.",
+            "transform": "Fit each pixel as the tile background plus one engraved foreground (ink or paper) and replace only the background contribution; keep alpha, padding and foreground detail. Each frame comes from the stable master of its own size: the .icns and .ico PNG frames are recoloured in place, and the per-size PNGs (in nightly/) and the 1024 master are recoloured from their own renders. No upscaling.",
         },
         "outputs": {str(path.relative_to(ROOT)): digest(data) for path, data in assets},
         "ico_frames": ["the stable .ico's own frames (16, 20, 24, 32, 40, 48, 64, 128, 256)"],
         "icns_slots": "the stable .icns's own PNG slots (icp4 through ic10)",
-        "validation": "Byte comparison against the committed assets (packaging/nightly-archive-tests.py and the icon check in packaging/nightly-tests.py); native Explorer/Finder rendering is not exercised here.",
+        "validation": "Byte comparison against the committed assets (packaging/nightly-archive-tests.py and the icon check in packaging/nightly-tests.py); native Explorer/Finder rendering is not exercised here. The per-size PNGs are kept out of hicolor/ because Stable's Linux and FreeBSD packages copy that theme tree whole.",
     }
 
 

@@ -9,8 +9,8 @@
 # is built for the host architecture (x86_64 or aarch64), which must match the tarball's.
 # Needs flatpak, flatpak-builder and the SVG pixbuf loader (librsvg2-common) for the host's
 # `appstreamcli compose`; the freedesktop runtime and SDK named in the manifest are
-# installed per-user from Flathub. Unless --no-test, the bundle is then installed per-user and
-# `texturecraft-cli --version` is run inside the sandbox as a smoke test.
+# installed per-user from Flathub. Unless --no-test, the bundle is then installed per-user and the
+# app (`texturecraft --version`) is run inside the sandbox as a smoke test.
 # Manifest: packaging/linux/flatpak/ai.storyteller.TextureCraft.bundle.yml.
 set -euo pipefail
 # shellcheck source=../env.sh
@@ -90,10 +90,12 @@ WRAPPER
       -e '/^MimeType=/d' \
       "$WORK/stage/share/applications/$APP_ID.desktop" >"$WORK/stage/share/applications/$FLATPAK_ID.desktop"
   rm -f "$WORK/stage/share/applications/$APP_ID.desktop"
+  # The Nightly entry drops MimeType=, so the metainfo must not advertise the types either.
   sed -e "s|<id>$APP_ID</id>|<id>$FLATPAK_ID</id>|g" \
       -e "s|<name>TextureCraft</name>|<name>TextureCraft Nightly</name>|g" \
       -e "s|<launchable type=\"desktop-id\">$APP_ID.desktop</launchable>|<launchable type=\"desktop-id\">$FLATPAK_ID.desktop</launchable>|g" \
       -e "s|<icon type=\"stock\">$APP_ID</icon>|<icon type=\"stock\">$FLATPAK_ID</icon>|g" \
+      -e '/<mediatype>/d' \
       "$WORK/stage/share/metainfo/$APP_ID.metainfo.xml" >"$WORK/stage/share/metainfo/$FLATPAK_ID.metainfo.xml"
   rm -f "$WORK/stage/share/metainfo/$APP_ID.metainfo.xml"
   rm -rf "$WORK/stage/share/mime"
@@ -105,9 +107,12 @@ WRAPPER
   install -Dm644 "$NIGHTLY_ICON" \
     "$WORK/stage/share/icons/hicolor/256x256/apps/$FLATPAK_ID.png"
   # Omit conflicting MIME registrations and disable host Flatpak updater talk-name until
-  # craft_update supports the nightly FLATPAK_ID.
+  # craft_update supports the nightly FLATPAK_ID. A Nightly bundle is also GUI-only: its tarball has
+  # no texturecraft-cli, and a CLI would read Stable's Documents/TextureCraft brushes.
   sed -e "s|ai\.storyteller\.texturecraft|$FLATPAK_ID|g" \
       -e '/share\/mime\/packages\//d' \
+      -e '/^\( *\)# \.tcraft, plus mesh types/d' \
+      -e '/bin\/texturecraft-cli/d' \
       -e '/--talk-name=org\.freedesktop\.Flatpak/d' \
       -e 's|- install -Dm755 bin/texturecraft /app/bin/texturecraft|- install -Dm755 bin/texturecraft-bin /app/libexec/texturecraft\n      - install -Dm755 bin/texturecraft /app/bin/texturecraft|' \
       "$HERE/flatpak/ai.storyteller.TextureCraft.bundle.yml" >"$WORK/$FLATPAK_ID.yml"
@@ -143,7 +148,7 @@ fi
 if [[ "$TEST" = 1 ]]; then
   flatpak install --user -y --noninteractive --reinstall "$OUT"
   flatpak info --user "$FLATPAK_ID"
-  flatpak run --command=texturecraft-cli "$FLATPAK_ID" --version
+  flatpak run --command=texturecraft "$FLATPAK_ID" --version
   if [[ "$FLATPAK_ID" == "$APP_ID" ]]; then
     flatpak run --command=sh "$FLATPAK_ID" -c 'ls /app/share/applications /app/share/metainfo /app/share/mime/packages /app/share/icons/hicolor/*/apps'
   else

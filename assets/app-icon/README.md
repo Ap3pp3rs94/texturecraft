@@ -70,7 +70,7 @@ they are. No badge, crescent or letter is added, so the two icons differ only in
 | `texturecraft-nightly-1024.png` | full tile, 1024 px (docs) |
 | `texturecraft-nightly.icns` | macOS icon set, the stable `.icns`'s own PNG slots recoloured |
 | `texturecraft-nightly.ico` | Windows icon, the stable `.ico`'s own frames (16 to 256 px) recoloured |
-| `hicolor/<size>/apps/ai.storyteller.texturecraft-nightly.png` | Linux theme icons for the Nightly package (16 to 512 px); the 16 to 64 px ones are the title bar's icon in a Nightly window |
+| `nightly/<size>.png` | per-size renders for the Nightly package and the title bar's icon in a Nightly window (16 to 512 px). Kept out of `hicolor/`, which Stable's Linux and FreeBSD packagers copy whole |
 | `nightly-provenance.json` | the inputs, the palette, the transform and the SHA-256 of every output |
 
 `packaging/nightly-icons.py` derives all of them from the committed stable renders (no upscale, no

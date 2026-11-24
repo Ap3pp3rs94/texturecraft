@@ -73,8 +73,14 @@ rm -rf "$WORK"
 
 # ---- stage an FHS tree (shared by every format) -------------------------------------------------
 install -Dm755 "$BIN/texturecraft" "$STAGE/usr/bin/texturecraft"
-install -Dm755 "$BIN/texturecraft-cli" "$STAGE/usr/bin/texturecraft-cli"
-"${CROSS_COMPILE:-}strip" "$STAGE/usr/bin/texturecraft" "$STAGE/usr/bin/texturecraft-cli" 2>/dev/null || true
+"${CROSS_COMPILE:-}strip" "$STAGE/usr/bin/texturecraft" 2>/dev/null || true
+# The Nightly formats ship the GUI only (the kit's rule). texturecraft-cli loads its brush presets
+# from the host's Documents/TextureCraft, which is Stable's folder (`crates/automation`'s Headless),
+# so a Nightly CLI would read and rewrite Stable's brushes. Stable keeps its CLI.
+if [[ "$IS_NIGHTLY" = 0 ]]; then
+  install -Dm755 "$BIN/texturecraft-cli" "$STAGE/usr/bin/texturecraft-cli"
+  "${CROSS_COMPILE:-}strip" "$STAGE/usr/bin/texturecraft-cli" 2>/dev/null || true
+fi
 install -Dm644 "$HERE/$APP_ID.desktop" "$STAGE/usr/share/applications/$APP_ID.desktop"
 if [[ "$IS_NIGHTLY" = 1 ]]; then
   sed -e 's|^StartupWMClass=.*|StartupWMClass=ai.storyteller.texturecraft.nightly-v1|' \
@@ -136,7 +142,6 @@ if has deb || has rpm; then
     NIGHTLY_DESK_ID="$APP_ID.nightly-v1"
     export NFPM_NAME="texturecraft-nightly"
     export NFPM_BIN="texturecraft-nightly"
-    export NFPM_CLI="texturecraft-nightly-cli"
     NFPM_STAGE="$WORK/nfpm-root"
     rm -rf "$NFPM_STAGE"
     cp -R "$STAGE" "$NFPM_STAGE"
@@ -156,7 +161,6 @@ exec "$bin" --launch-profile nightly-v1 --profile-root "$profile" -- "$@"
 WRAPPER
     chmod 755 "$NFPM_STAGE/usr/bin/$NFPM_BIN"
     rm -f "$NFPM_STAGE/usr/bin/texturecraft"
-    mv "$NFPM_STAGE/usr/bin/texturecraft-cli" "$NFPM_STAGE/usr/bin/$NFPM_CLI"
     mv "$NFPM_STAGE/usr/share/doc/texturecraft" "$NFPM_STAGE/usr/share/doc/$NFPM_NAME"
     sed -e "s#^Exec=texturecraft\([[:space:]]\|$\)#Exec=$NFPM_BIN\1#" \
         -e "s|^TryExec=texturecraft$|TryExec=$NFPM_BIN|" \
@@ -182,10 +186,14 @@ WRAPPER
   fi
   # nfpm expands env vars in fields like `version` and `arch`, but not in `contents[].src`.
   DROP_LIB_TREE=
+  DROP_CLI=
   # shellcheck disable=SC2016
   [[ -d "$NFPM_STAGE/usr/lib" ]] || DROP_LIB_TREE='\|^  - src: \${STAGE}/usr/lib/|,+2d;'
+  # A Nightly package has no CLI, so its file list must not name one either.
   # shellcheck disable=SC2016
-  sed "${DROP_LIB_TREE}s|\${STAGE}|$NFPM_STAGE|g;s|\${NFPM_BIN}|$NFPM_BIN|g;s|\${NFPM_CLI}|$NFPM_CLI|g" "$HERE/nfpm.yaml" >"$WORK/nfpm.yaml"
+  [[ "$IS_NIGHTLY" = 0 ]] || DROP_CLI='\|^  - src: \${STAGE}/usr/bin/\${NFPM_CLI}|,+2d;/Includes texturecraft-cli/d;'
+  # shellcheck disable=SC2016
+  sed "${DROP_LIB_TREE}${DROP_CLI}s|\${STAGE}|$NFPM_STAGE|g;s|\${NFPM_BIN}|$NFPM_BIN|g;s|\${NFPM_CLI}|$NFPM_CLI|g" "$HERE/nfpm.yaml" >"$WORK/nfpm.yaml"
   # The riscv64 cross sysroot is Ubuntu 24.04, whose glibc floor is 2.39.
   if [[ "$ARCH" = riscv64 ]]; then sed -i "s/libc6 (>= 2.35)/libc6 (>= 2.39)/" "$WORK/nfpm.yaml"; fi
   for fmt in deb rpm; do
@@ -224,10 +232,13 @@ if has appimage; then
         "$APPDIR/usr/share/applications/$APP_ID.desktop" >"$APPDIR/usr/share/applications/$APPIMAGE_ID.desktop"
     rm -f "$APPDIR/usr/share/applications/$APP_ID.desktop"
     cp "$APPDIR/usr/share/applications/$APPIMAGE_ID.desktop" "$APPDIR/$APPIMAGE_ID.desktop"
+    # The Nightly desktop entry drops MimeType=, so the metainfo must not advertise the same types
+    # either: AppStream would otherwise list a type the package cannot open.
     sed -e "s|<id>$APP_ID</id>|<id>$APPIMAGE_ID</id>|g" \
         -e "s|<name>TextureCraft</name>|<name>TextureCraft Nightly</name>|g" \
         -e "s|<launchable type=\"desktop-id\">$APP_ID.desktop</launchable>|<launchable type=\"desktop-id\">$APPIMAGE_ID.desktop</launchable>|g" \
         -e "s|<icon type=\"stock\">$APP_ID</icon>|<icon type=\"stock\">$APPIMAGE_ID</icon>|g" \
+        -e '/<mediatype>/d' \
         "$APPDIR/usr/share/metainfo/$APP_ID.metainfo.xml" >"$APPDIR/usr/share/metainfo/$APPIMAGE_ID.metainfo.xml"
     rm -f "$APPDIR/usr/share/metainfo/$APP_ID.metainfo.xml"
     rm -rf "$APPDIR/usr/share/icons/hicolor"
@@ -287,10 +298,14 @@ if has appimage; then
   fi
 fi
 
+# A Stable tree is checked through its CLI; a Nightly tree has only the GUI, which answers the
+# same bare `--version` query (no profile, so nothing is created) with its channel line.
+SMOKE_BIN="$STAGE/usr/bin/texturecraft-cli"
+if [[ "$IS_NIGHTLY" = 1 ]]; then SMOKE_BIN="$STAGE/usr/bin/texturecraft"; fi
 if [[ -n "${CROSS_TARGET:-}" ]]; then
-  if [[ -n "${EMULATOR:-}" ]]; then "$EMULATOR" "$STAGE/usr/bin/texturecraft-cli" --version; fi
+  if [[ -n "${EMULATOR:-}" ]]; then "$EMULATOR" "$SMOKE_BIN" --version; fi
 else
-  "$STAGE/usr/bin/texturecraft-cli" --version
+  "$SMOKE_BIN" --version
 fi
 echo "==> done"
 ls -lh "$DIST"

@@ -8,11 +8,6 @@ use std::sync::OnceLock;
 
 pub const VERSION: &str = "nightly-v1";
 
-/// A package wrapper's private directory. It names the same root the Launcher passes as
-/// `--profile-root`, so a tar or nfpm wrapper (`packaging/linux/nightly-arch-launch.sh`) isolates a
-/// nightly install without the literal pair; a nightly build treats it as its profile.
-pub const ROOT_ENV: &str = "TEXTURECRAFT_DATA_DIR";
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Profile {
     Stable,
@@ -94,22 +89,6 @@ pub fn parse(args: Vec<OsString>) -> Result<Launch, String> {
         (Some(_), Some(_)) => Err("unsupported launch profile (expected nightly-v1)".into()),
         _ => Err("--launch-profile and --profile-root must be supplied together".into()),
     }
-}
-
-/// [`parse`], plus a nightly build's wrapper directory: when no literal pair is given and the
-/// build is nightly, `<APP>_DATA_DIR` is the same private root. A stable build never adopts it, so
-/// its arguments and directory policy stay exactly as they were.
-pub fn parse_startup(args: Vec<OsString>, env_root: Option<OsString>, nightly_build: bool) -> Result<Launch, String> {
-    let launch = parse(args)?;
-    if !nightly_build || launch.profile.is_nightly() {
-        return Ok(launch);
-    }
-    let Some(root) = env_root.filter(|value| !value.is_empty()) else { return Ok(launch) };
-    let root = PathBuf::from(root);
-    if !root.is_absolute() || root.components().any(|c| matches!(c, Component::ParentDir)) {
-        return Err(format!("{ROOT_ENV} must be absolute and contain no parent traversal"));
-    }
-    Ok(Launch { profile: Profile::NightlyV1(root), args: launch.args })
 }
 
 /// The Launcher's version check: the selector/root pair followed by exactly `--version` (or `-V`),
@@ -218,29 +197,6 @@ mod tests {
         }
         // Outside the query the strict protocol still refuses the version flag.
         assert!(parse(args(&["--launch-profile", VERSION, "--profile-root", absolute(), "--version"])).is_err());
-    }
-
-    #[test]
-    fn a_nightly_build_takes_a_wrappers_directory_as_its_profile_and_a_stable_build_never_does() {
-        let wrapper = Some(OsString::from(absolute()));
-        let launch = parse_startup(args(&["model.glb"]), wrapper.clone(), true).unwrap();
-        assert_eq!(launch.profile, Profile::NightlyV1(PathBuf::from(absolute())));
-        assert_eq!(launch.args, args(&["model.glb"]));
-        // The literal Launcher pair wins over the variable.
-        let other = if cfg!(windows) { r"C:\Launcher\profiles\texturecraft" } else { "/launcher/profiles/texturecraft" };
-        let launch = parse_startup(nightly(), Some(OsString::from(other)), true).unwrap();
-        assert_eq!(launch.profile, Profile::NightlyV1(PathBuf::from(absolute())));
-        // Stable keeps its arguments and has no profile at all.
-        for env in [wrapper.clone(), None] {
-            let launch = parse_startup(args(&["model.glb"]), env, false).unwrap();
-            assert_eq!(launch, Launch { profile: Profile::Stable, args: args(&["model.glb"]) });
-        }
-        // An empty or unusable variable is not a profile.
-        for env in [Some(OsString::new()), Some(OsString::from("relative/path"))] {
-            let launch = parse_startup(args(&[]), env, true).unwrap();
-            assert_eq!(launch.profile, Profile::Stable);
-        }
-        assert!(parse_startup(args(&[]), Some(OsString::from("../escape")), true).is_err());
     }
 
     #[test]

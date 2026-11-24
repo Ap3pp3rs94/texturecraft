@@ -16,7 +16,6 @@ cat >"$stage/bin/texturecraft" <<'RECORDER'
 printf '<%s>\n' "$@"
 RECORDER
 chmod 755 "$stage/bin/texturecraft"
-cp "$stage/bin/texturecraft" "$stage/bin/texturecraft-cli"
 
 bash "$HERE/nightly-arch-tar.sh" "$stage" "$work/stage" "$dst" "$base"
 tar -xzf "$dst/$base.tar.gz" -C "$work/extract"
@@ -26,11 +25,11 @@ mkdir -p "$work/installed"
 cp -R "$bin" "$work/installed/bin"
 bin="$work/installed/bin"
 mv "$bin/texturecraft" "$bin/texturecraft-nightly"
-mv "$bin/texturecraft-cli" "$bin/texturecraft-nightly-cli"
 
 test ! -e "$stage/bin/.texturecraft-nightly"
 cmp "$stage/bin/texturecraft" "$bin/.texturecraft-nightly/texturecraft"
-cmp "$stage/bin/texturecraft-cli" "$bin/texturecraft-nightly-cli"
+# A Nightly package is GUI-only: the handoff must not carry a CLI that would use Stable's brushes.
+test ! -e "$bin/texturecraft-nightly-cli" || { echo "FAIL: the Arch handoff still ships a Nightly CLI" >&2; exit 1; }
 profile="${XDG_DATA_HOME:-${HOME:-}/.local/share}/TextureCraft-Nightly"
 # A launch adds the Launcher's literal selector/root pair and the file delimiter; a version query or
 # an already-formed protocol passes through untouched.

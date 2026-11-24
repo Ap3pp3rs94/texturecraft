@@ -102,6 +102,12 @@ and pass a Launcher protocol or a `--version`/`-V` query through untouched (so t
 `texturecraft-nightly --version` still answer). The profile is outside stable's folders and outside
 the unpacked or installed copy, which the flavor's fence would otherwise refuse.
 
+Every Nightly Linux format is GUI only. `texturecraft-cli` stays in the Stable packages: a headless
+run loads its brush presets from `Documents/TextureCraft`, which is Stable's folder on every
+platform and cannot be redirected by the launch profile, so a Nightly CLI would read and rewrite
+Stable's brushes. The Flatpak smoke test therefore asks the app (`flatpak run --command=texturecraft`),
+and the Arch handoff no longer stages a CLI.
+
 The producer's Windows and macOS legs run scripts this repository owns. Their inputs are the four
 `TEXTURECRAFT_*` values the feed prepares (channel, exact version, commit, original run date), an
 absolute `CARGO_TARGET_DIR` and `DIST`, and optionally `CRAFT_FONTS_DIR` with

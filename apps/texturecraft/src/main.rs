@@ -28,6 +28,10 @@ use texturecraft_ui_egui::{TextureCraftApp, UiState};
 /// The app name eframe keeps the settings under (`eframe::storage_dir`).
 const APP_NAME: &str = "TextureCraft";
 
+/// The data folder Dylan's #801 packaging lets a Stable wrapper set. A Nightly launch never reads
+/// it: its profile arrives as the Launcher's literal selector/root pair, and nothing else.
+const DATA_DIR_ENV: &str = "TEXTURECRAFT_DATA_DIR";
+
 /// The window's size when it opens, in points.
 const DEFAULT_SIZE: [f32; 2] = [1600.0, 960.0];
 /// The smallest size the window can be resized to, in points.
@@ -70,10 +74,11 @@ fn parse_args_from<I: IntoIterator<Item = String>>(it: I) -> Result<Option<Args>
     let mut after_delimiter = false;
     while let Some(a) = it.next() {
         if after_delimiter {
-            if args.file.is_some() {
-                return Err("only one project or mesh can be opened".into());
+            // A Launcher hand-off may carry more than one file. Opening the first one beats a
+            // silent exit on a Windows build, which has no console to show the refusal on.
+            if args.file.is_none() {
+                args.file = Some(a);
             }
-            args.file = Some(a);
             continue;
         }
         match a.as_str() {
@@ -161,16 +166,29 @@ fn set_taskbar_icon(w: &winit::window::Window) {
 }
 
 /// Directory for saved settings, UI state, and error logs: a Nightly launch's validated profile,
-/// else `TEXTURECRAFT_DATA_DIR` (when non-empty, as a package wrapper sets it), else eframe's own
-/// folder for this app.
+/// else `TEXTURECRAFT_DATA_DIR` (when non-empty, as a Stable package wrapper sets it), else
+/// eframe's own folder for this app.
 fn storage_dir() -> Option<std::path::PathBuf> {
-    if let Some(root) = launch_profile::current().root() {
-        return Some(root.to_path_buf());
-    }
-    if let Some(dir) = std::env::var_os(launch_profile::ROOT_ENV).filter(|v| !v.is_empty()) {
-        return Some(std::path::PathBuf::from(dir));
-    }
-    eframe::storage_dir(APP_NAME)
+    settings_folder(
+        launch_profile::current().root(),
+        std::env::var_os(DATA_DIR_ENV).filter(|v| !v.is_empty()).map(std::path::PathBuf::from),
+        eframe::storage_dir(APP_NAME),
+    )
+}
+
+/// The settings folder, in the order a launch decides it: a Nightly profile, a Stable wrapper's
+/// `TEXTURECRAFT_DATA_DIR`, else eframe's own folder for this app.
+///
+/// The last one is passed in rather than left to eframe. With `with_app_id` set (the Linux window
+/// class the Stable entry needs), eframe derives its folder from the app id, so Stable's `app.ron`
+/// — window state and the user's export presets — would move to `ai.storyteller.texturecraft` while
+/// `ui.json` and `errors.log` stayed behind. `persistence_path` therefore names the file explicitly.
+fn settings_folder(
+    profile: Option<&std::path::Path>,
+    wrapper_dir: Option<std::path::PathBuf>,
+    legacy: Option<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    profile.map(std::path::Path::to_path_buf).or(wrapper_dir).or(legacy)
 }
 
 /// Preferences needed before opening the initial project or window, with legacy storage fallback.
@@ -277,8 +295,7 @@ fn prepare_launch() -> Option<Vec<OsString>> {
         let _ = writeln!(std::io::stdout(), "{}", build_flavor::version(build_flavor::COMPILED));
         return None;
     }
-    let nightly_build = build_flavor::COMPILED == build_flavor::BuildFlavor::NightlyV1;
-    let early = launch_profile::parse_startup(argv, std::env::var_os(launch_profile::ROOT_ENV), nightly_build)
+    let early = launch_profile::parse(argv)
         .and_then(|launch| {
             build_flavor::require_profile(build_flavor::COMPILED, &launch.profile)?;
             initialize_nightly_process_identity().map_err(|error| error.to_string())?;
@@ -330,7 +347,7 @@ fn main() {
 
     let Some(arguments) = prepare_launch() else { return };
     let nightly = launch_profile::current().is_nightly();
-    let args = match launch_arguments(arguments).and_then(|values| parse_args_from(values)) {
+    let args = match launch_arguments(arguments).and_then(parse_args_from) {
         Ok(Some(a)) => a,
         Ok(None) => return,
         Err(e) => {
@@ -354,14 +371,12 @@ fn main() {
         previous_hook(info);
     }));
 
-    // Scripted runs use temporary files so they cannot overwrite saved settings
+    // Scripted runs use temporary files so they cannot overwrite saved settings. Otherwise eframe
+    // is told the file explicitly, so `with_app_id` cannot move Stable's `app.ron` out of the
+    // folder `storage_dir` keeps `ui.json` and `errors.log` in (see `settings_folder`).
     let no_prefs_path =
         std::env::var_os("TEXTURECRAFT_NO_PREFS").map(|_| std::env::temp_dir().join(format!("texturecraft-noprefs-{}.ron", std::process::id())));
-    let persistence_path = no_prefs_path.clone().or_else(|| {
-        launch_profile::current().root().map(|root| root.join("app.ron")).or_else(|| {
-            std::env::var_os(launch_profile::ROOT_ENV).filter(|v| !v.is_empty()).map(|dir| std::path::PathBuf::from(dir).join("app.ron"))
-        })
-    });
+    let persistence_path = no_prefs_path.clone().or_else(|| storage_dir().map(|dir| dir.join("app.ron")));
     let ui_file = no_prefs_path.as_ref().map(|path| path.with_extension("json")).or_else(|| storage_dir().map(|folder| folder.join("ui.json")));
     if let Some(file) = &ui_file {
         let _ = ui_state_store::FILE.set(file.clone());
@@ -444,7 +459,13 @@ fn main() {
                 });
                 notice_shown_in_window.store(previous_nightly_unclean, std::sync::atomic::Ordering::Relaxed);
             }
-            Ok(Box::new(Shell { app, window_frame, exit_hook: Some(Box::new(finish_at_exit)), #[cfg(target_os = "macos")] movable: None }))
+            Ok(Box::new(Shell {
+                app,
+                window_frame,
+                exit_hook: Some(Box::new(finish_at_exit)),
+                #[cfg(target_os = "macos")]
+                movable: None,
+            }))
         }),
     );
     // A controlled return, including a handled startup error. On macOS a window already finished in
@@ -505,6 +526,31 @@ mod tests {
     }
 
     #[test]
+    fn stable_settings_stay_in_the_folder_eframe_used_before_the_app_id() {
+        let legacy = std::path::PathBuf::from("/legacy/TextureCraft");
+        // Stable, no wrapper folder: the folder eframe picked for `APP_NAME` before `with_app_id`
+        // existed, so `app.ron` (window state and the export presets stored in it) does not move.
+        let folder = settings_folder(None, None, Some(legacy.clone())).expect("a legacy folder");
+        assert_eq!(folder.join("app.ron"), legacy.join("app.ron"));
+        // A Stable wrapper's data folder still wins, which is what #801's packaging expects.
+        let wrapper = std::path::PathBuf::from("/wrapper/data");
+        assert_eq!(settings_folder(None, Some(wrapper.clone()), Some(legacy.clone())), Some(wrapper.clone()));
+        // A Nightly profile wins over both, so no Stable folder is ever read.
+        assert_eq!(settings_folder(Some(std::path::Path::new("/profile")), Some(wrapper), Some(legacy)), Some(std::path::PathBuf::from("/profile")));
+        // Nothing resolvable: there is no folder to fall back to and eframe keeps its own default.
+        assert_eq!(settings_folder(None, None, None), None);
+        // The app's wiring: with no profile and no wrapper folder, `app.ron` sits beside `ui.json`
+        // in eframe's folder for `APP_NAME`, not in the folder of the app id `with_app_id` sets.
+        if std::env::var_os(DATA_DIR_ENV).is_none()
+            && !launch_profile::current().is_nightly()
+            && let Some(stable) = eframe::storage_dir(APP_NAME)
+        {
+            assert_eq!(storage_dir(), Some(stable.clone()));
+            assert_eq!(storage_dir().map(|dir| dir.join("app.ron")), Some(stable.join("app.ron")));
+        }
+    }
+
+    #[test]
     fn a_file_after_the_delimiter_is_a_file_even_when_it_looks_like_an_option() {
         let args = parse_args_from(["--".to_string(), "--version".to_string()]).unwrap().unwrap();
         assert_eq!(args.file.as_deref(), Some("--version"));
@@ -513,8 +559,9 @@ mod tests {
         // Options before the delimiter still parse as options.
         let args = parse_args_from(["--gpu".to_string(), "nvidia".to_string(), "--".to_string(), "a.glb".to_string()]).unwrap().unwrap();
         assert_eq!((args.gpu.as_deref(), args.file.as_deref()), (Some("nvidia"), Some("a.glb")));
-        // One window opens one project.
-        assert!(parse_args_from(["--".to_string(), "a.glb".to_string(), "b.glb".to_string()]).is_err());
+        // One window opens one project: extra files after the delimiter are ignored, in that order.
+        let args = parse_args_from(["--".to_string(), "a.glb".to_string(), "b.glb".to_string()]).unwrap().unwrap();
+        assert_eq!(args.file.as_deref(), Some("a.glb"));
     }
 
     #[test]

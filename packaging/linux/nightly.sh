@@ -26,7 +26,7 @@ cp "$NIGHTLY_GUI" "$STAGE/texturecraft-bin"
 chmod 755 "$STAGE/texturecraft-bin"
 cp "$ROOT/packaging/linux/nightly-launch.sh" "$STAGE/texturecraft"
 chmod 755 "$STAGE/texturecraft"
-cp "$ROOT/assets/app-icon/texturecraft-1024.png" "$STAGE/texturecraft-nightly.png"
+cp "$ROOT/assets/app-icon/texturecraft-nightly-1024.png" "$STAGE/texturecraft-nightly.png"
 nightly_copy_notices "$STAGE"
 # The private mktemp cwd is the helper authority root, not a CLI path parent.
 (cd "$NIGHTLY_WORK" && python3 "$ROOT/packaging/nightly-archive.py" linux stage archive.tar.gz)

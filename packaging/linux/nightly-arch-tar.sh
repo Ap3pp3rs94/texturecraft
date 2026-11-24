@@ -11,6 +11,9 @@ stage="$work/$basename"
 
 mkdir -p "$work"
 cp -R "$source_tree" "$stage"
+# The Nightly package is GUI-only: texturecraft-cli would read and rewrite Stable's
+# Documents/TextureCraft brushes, which a private profile cannot redirect.
+rm -f "$stage/bin/texturecraft-cli"
 mkdir "$stage/bin/.texturecraft-nightly"
 mv "$stage/bin/texturecraft" "$stage/bin/.texturecraft-nightly/texturecraft"
 cp "$here/nightly-arch-launch.sh" "$stage/bin/texturecraft"

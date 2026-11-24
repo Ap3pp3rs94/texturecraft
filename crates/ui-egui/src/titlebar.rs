@@ -56,11 +56,11 @@ const ICONS: [(f32, &[u8]); 5] = [
 /// The Nightly strip's icon PNGs, same sizes: the deeper background tells the two windows apart at
 /// a glance and matches the packaged Nightly icon.
 const NIGHTLY_ICONS: [(f32, &[u8]); 5] = [
-    (16.0, include_bytes!("../../../assets/app-icon/hicolor/16x16/apps/ai.storyteller.texturecraft-nightly.png")),
-    (24.0, include_bytes!("../../../assets/app-icon/hicolor/24x24/apps/ai.storyteller.texturecraft-nightly.png")),
-    (32.0, include_bytes!("../../../assets/app-icon/hicolor/32x32/apps/ai.storyteller.texturecraft-nightly.png")),
-    (48.0, include_bytes!("../../../assets/app-icon/hicolor/48x48/apps/ai.storyteller.texturecraft-nightly.png")),
-    (64.0, include_bytes!("../../../assets/app-icon/hicolor/64x64/apps/ai.storyteller.texturecraft-nightly.png")),
+    (16.0, include_bytes!("../../../assets/app-icon/nightly/16.png")),
+    (24.0, include_bytes!("../../../assets/app-icon/nightly/24.png")),
+    (32.0, include_bytes!("../../../assets/app-icon/nightly/32.png")),
+    (48.0, include_bytes!("../../../assets/app-icon/nightly/48.png")),
+    (64.0, include_bytes!("../../../assets/app-icon/nightly/64.png")),
 ];
 
 impl TitleBar {
