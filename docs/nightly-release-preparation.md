@@ -95,11 +95,14 @@ those values in the same reviewed change that promotes the policy to `release`.
 ## App-side producer scripts (Windows and macOS)
 
 **Every Linux Nightly format starts the app the flavor's way.** The `.deb`/`.rpm` wrapper, the
-Arch launcher, the Flatpak wrapper, the AppImage's `AppRun` and the launcher inside the plain
-`nightly.tar.gz` all exec the real GUI with the literal
+Arch launcher, the Flatpak wrapper and the AppImage's `AppRun` all exec the real GUI with the literal
 `--launch-profile nightly-v1 --profile-root <${XDG_DATA_HOME:-~/.local/share}/TextureCraft-Nightly> --`,
 and pass a Launcher protocol or a `--version`/`-V` query through untouched (so the smoke checks and
-`texturecraft-nightly --version` still answer). The profile is outside stable's folders and outside
+`texturecraft-nightly --version` still answer). The plain `nightly.tar.gz` (and `package.sh`'s tree tarball, which installs the same file) uses craft-common-actions'
+shared launcher template (#363, rendered for this app) instead: its `texturecraft` always adds its own
+tokens, execs `texturecraft-bin` beside it with
+`--profile-root <${XDG_DATA_HOME:-~/.local/share}/ai.storyteller.texturecraft.nightly> --`, and asks a
+bare `--version`/`-V` in the Launcher's own form. The profile is outside stable's folders and outside
 the unpacked or installed copy, which the flavor's fence would otherwise refuse.
 
 Every Nightly Linux format is GUI only. `texturecraft-cli` stays in the Stable packages: a headless
