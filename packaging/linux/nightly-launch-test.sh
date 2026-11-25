@@ -21,7 +21,7 @@ chmod 755 "$work/tree/texturecraft"
 
 # The bytes are the shared template rendered for this app, not a local script.
 sha256sum "$HERE/nightly-launch.sh" | cut -d' ' -f1 | grep -qx \
-  fca10655bfb78581208d6772e6fb7cb98cc4a45787ee5389088e65945fdec4b5 || {
+  8941ee4947ef4c3fc4a663600569d985b41c0b9ce6f9833d0c6777aa2b4d6acf || {
   echo "FAIL: nightly-launch.sh is not the shared template rendered for texturecraft" >&2
   exit 1
 }
@@ -65,6 +65,14 @@ expect "$XDG_DATA_HOME/$identity" 'model.glb'
 expect_query "$XDG_DATA_HOME/$identity"
 unset XDG_DATA_HOME
 expect_query "$HOME/.local/share/$identity"
+
+# The ArtCraft Launcher names its own profile and per-install root: the argv goes through unchanged.
+forward="--launch-profile nightly-v1 --profile-root $work/launcher profile with space -- file.doc"
+actual=$("$work/tree/texturecraft" --launch-profile nightly-v1 --profile-root "$work/launcher profile with space" -- file.doc)
+[[ "$actual" == "$(printf '<%s>\n' --launch-profile nightly-v1 --profile-root "$work/launcher profile with space" -- file.doc)" ]] || {
+  printf 'expected the Launcher argv unchanged\nactual:\n%s\n' "$actual" >&2
+  exit 1
+}
 
 # The launcher itself writes nothing: the profile folder is the GUI's to create.
 [[ ! -e "$HOME/.local/share/$identity" ]] || { echo "FAIL: the launcher created the profile" >&2; exit 1; }
