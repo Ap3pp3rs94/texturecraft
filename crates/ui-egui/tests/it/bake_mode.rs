@@ -55,6 +55,8 @@ fn type_slider_value(harness: &mut Harness<'_, TextureCraftApp>, label: &str, te
     harness.run_steps(3);
 }
 
+// No EGL display in the Sonar coverage job, where the GL bake crashes the test process at exit.
+#[cfg_attr(coverage, ignore = "needs a display")]
 #[test]
 fn mesh_map_edits_update_all_sets_without_copying_unedited_fields() {
     let mut harness = harness(Some(BakedMap::AmbientOcclusion));
@@ -409,6 +411,8 @@ fn height_controls_follow_manual_normalization_and_the_row_checkbox_enables_heig
     assert!(!harness.state().session.doc.project.texture_sets[0].bake.maps.height.is_enabled);
 }
 
+// No EGL display in the Sonar coverage job, where the GL bake crashes the test process at exit.
+#[cfg_attr(coverage, ignore = "needs a display")]
 #[test]
 fn clicking_a_row_shows_that_maps_settings_without_changing_what_bakes() {
     let mut harness = harness(Some(BakedMap::Curvature));
@@ -441,6 +445,8 @@ fn check_all_enables_every_map_then_disables_them_all() {
     assert!(enabled_maps(&harness).is_empty());
 }
 
+// No EGL display in the Sonar coverage job, where the GL bake crashes the test process at exit.
+#[cfg_attr(coverage, ignore = "needs a display")]
 #[test]
 fn the_breadcrumb_switches_the_shown_map() {
     let mut harness = harness(Some(BakedMap::Curvature));
@@ -471,6 +477,8 @@ fn a_long_texture_set_name_leaves_the_map_switcher_and_restore_defaults_in_the_b
     assert!(switcher.right() <= restore.left(), "the map switcher stays left of Restore Defaults");
 }
 
+// No EGL display in the Sonar coverage job, where the GL bake crashes the test process at exit.
+#[cfg_attr(coverage, ignore = "needs a display")]
 #[test]
 fn curvature_controls_follow_the_method_and_grey_out_by_their_switches() {
     let mut harness = harness(Some(BakedMap::Curvature));

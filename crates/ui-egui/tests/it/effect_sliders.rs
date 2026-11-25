@@ -64,7 +64,9 @@ fn dragging_a_slider_applies_it() {
     assert!(balance(&harness, effect) < 0.25, "the dragged balance applies: {}", balance(&harness, effect));
 }
 
+// No EGL display in the Sonar coverage job, where the GL bake crashes the test process at exit.
 /// A generator slider applies while it is dragged (the texture follows the pointer), and the whole drag is one undo step
+#[cfg_attr(coverage, ignore = "needs a display")]
 #[test]
 fn dragging_a_generator_slider_applies_live_as_one_undo_step() {
     let (mut harness, effect) = selected_generator();
@@ -93,6 +95,8 @@ fn dragging_a_generator_slider_applies_live_as_one_undo_step() {
     assert_eq!(harness.state().session.history_labels().len(), steps + 1, "one undo step for the drag");
 }
 
+// No EGL display in the Sonar coverage job, where the GL bake crashes the test process at exit.
+#[cfg_attr(coverage, ignore = "needs a display")]
 #[test]
 fn clicking_a_slider_track_applies_it() {
     let (mut harness, effect) = selected_generator();

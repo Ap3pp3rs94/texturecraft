@@ -147,6 +147,8 @@ fn a_wear_control_moves_an_earlier_wear_generator_onto_the_wear_controls() {
     assert_eq!(WearParameters { level: defaults.level, ..wear }, defaults, "the other controls start at their defaults");
 }
 
+// No EGL display in the Sonar coverage job, where the GL bake crashes the test process at exit.
+#[cfg_attr(coverage, ignore = "needs a display")]
 #[test]
 fn restore_defaults_keeps_a_wear_generator_on_its_wear_controls() {
     let (mut harness, effect) = harness_with(false, json!({"generator": "dirt", "grungeAmount": 0.9, "seed": 3}));
@@ -243,6 +245,8 @@ fn a_section_control_moves_an_earlier_generator_onto_the_section_controls() {
     assert_eq!(count(&harness, "Level"), 0, "the earlier rows are gone");
 }
 
+// No EGL display in the Sonar coverage job, where the GL bake crashes the test process at exit.
+#[cfg_attr(coverage, ignore = "needs a display")]
 #[test]
 fn a_curvature_size_column_sets_its_size_alone_in_one_step() {
     let (mut harness, effect) = harness(false);
