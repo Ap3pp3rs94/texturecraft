@@ -2,12 +2,6 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-/// Generate Rust includes for the optional catalog checkout; required input must contain app catalogs.
-/// Paths are escaped as Rust strings so Windows separators and spaces remain valid.
-pub fn generate(dir: Option<&Path>, required: bool) -> Result<String, String> {
-    collect(dir, required).map(|(source, _)| source)
-}
-
 /// The catalogs' Rust includes and the distinct characters they use, sorted: the web build cuts
 /// its CJK interface face to those characters.
 pub fn collect(dir: Option<&Path>, required: bool) -> Result<(String, Vec<char>), String> {
