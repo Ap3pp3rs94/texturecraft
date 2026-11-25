@@ -117,7 +117,8 @@ those values in the same reviewed change that promotes the policy to `release`.
 - `nightly-sign.yml` keeps its literal root `concurrency:` block (`texturecraft-nightly-release`,
   `cancel-in-progress: false`, `queue: max`).
 - `.github/nightly-signing-policy.json` matches the v3 schema, repository identity, platform
-  trust anchors, CI workflow trigger contract, and SonarCloud project identity.
+  trust anchors, CI workflow trigger contract, SonarCloud project identity, and the reviewed Sonar
+  gate shape (accepted failures inside the issue scope, every live gate condition present once).
 - The signer guards `refs/heads/nightly-signer`, passes `app-name: texturecraft`, and the policy's
   `release_branch` names it.
 - A trust-closure scan reads every workflow: nothing binds an `environment`, only `nightly-sign.yml`
@@ -170,13 +171,14 @@ release-dispatch and macOS signing suites, plus the Nightly icons must be byte-i
 three macOS scripts. The full-ci macOS job (`nightly-macos.yml`) is the only place the bundle and
 its version query actually run before the first supervised release.
 
-## Activation prerequisite: the Sonar issue scope
+## The Sonar issue scope
 
 The pinned candidate validator requires every entry in `candidate_policy.sonar.issue_types` to map
 from a reviewed `accepted_conditions` row, and it requires the gate condition set to equal
-`accepted_conditions` plus `required_conditions`. The installed policy lists `VULNERABILITY` with no
-accepted condition, so it fails that contract before SonarCloud is read. Correct the policy in this
-app's activation review with Skylar, together with the live gate conditions, before the first run.
-`producer_workflow_id` is now populated and the signer runs on `nightly-signer`, so this policy
-correction - with the registry's Windows and macOS targets - is what still stands between this tree
+`accepted_conditions` plus `required_conditions`. The installed policy lists `VULNERABILITY` with
+`new_security_rating` accepted (max 5) and the other five gate conditions required - the same shape
+PhotoCraft and WordCraft ship - so it satisfies that contract before SonarCloud is read. `debt` stays
+empty, so any unresolved vulnerability on `main` is still refused, and the live gate is still compared
+condition by condition against the policy. `producer_workflow_id` is now populated and the signer runs
+on `nightly-signer`; the registry's Windows and macOS targets are what still stand between this tree
 and a first signed nightly.
