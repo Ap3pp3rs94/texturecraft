@@ -99,8 +99,8 @@ Arch launcher, the Flatpak wrapper and the AppImage's `AppRun` all exec the real
 `--launch-profile nightly-v1 --profile-root <${XDG_DATA_HOME:-~/.local/share}/TextureCraft-Nightly> --`,
 and pass a Launcher protocol or a `--version`/`-V` query through untouched (so the smoke checks and
 `texturecraft-nightly --version` still answer). The plain `nightly.tar.gz` (and `package.sh`'s tree tarball, which installs the same file) uses craft-common-actions'
-shared launcher template (#363, rendered for this app) instead: its `texturecraft` always adds its own
-tokens, execs `texturecraft-bin` beside it with
+shared launcher template (#363, rendered for this app) instead: its `texturecraft` adds its own
+tokens unless the first argument is already a `--launch-profile` pair, execs `texturecraft-bin` beside it with
 `--profile-root <${XDG_DATA_HOME:-~/.local/share}/ai.storyteller.texturecraft.nightly> --`, and asks a
 bare `--version`/`-V` in the Launcher's own form. The profile is outside stable's folders and outside
 the unpacked or installed copy, which the flavor's fence would otherwise refuse.
