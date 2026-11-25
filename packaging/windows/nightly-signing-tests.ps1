@@ -15,13 +15,29 @@ function Invoke-Refusal([scriptblock] $Operation, [string] $Message) {
   Assert-Policy ($errorText.Contains($Message)) "expected refusal: $Message; got: $errorText"
 }
 function global:cargo { $global:SigningFixtureCargoCalls++; throw 'FIXTURE_COMPILER_BOUNDARY' }
+# The source preflight reads the real checkout; the fixture answers for its own commit, whose sha
+# the version names, so the clean case reaches the mocked compiler instead of the preflight.
+function global:git {
+  param([Parameter(ValueFromRemainingArguments=$true)][object[]] $Arguments)
+  $joined = ($Arguments | ForEach-Object { "$_" }) -join ' '
+  if ($joined -match 'rev-parse HEAD$') { $global:LASTEXITCODE = 0; return ('a' * 40) }
+  if ($joined -match 'status --porcelain$') { $global:LASTEXITCODE = 0; return '' }
+  throw "the fixture must not run git: $joined"
+}
 function global:Invoke-WebRequest { throw 'fixture must not perform signing downloads' }
 $global:SigningFixtureCargoCalls = 0
+# The caller's own values, restored in `finally`: this script may run inside a developer's session.
+$savedEnvironment = foreach ($name in (@('TEXTURECRAFT_VERSION', 'TEXTURECRAFT_BUILD_SHA', 'TEXTURECRAFT_BUILD_DATE') + $names)) {
+  [pscustomobject]@{ Name = $name; Value = [Environment]::GetEnvironmentVariable($name) }
+}
 if (-not [IO.Path]::IsPathRooted($FixtureRoot)) { throw 'use an owned absolute FixtureRoot' }
 $root = Join-Path $FixtureRoot ('signing-policy-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $root | Out-Null
 $version = '0.23.1-nightly.20261121.12345.1.gaaaaaaaaaaaa'
 $env:TEXTURECRAFT_VERSION = $version
+# The identity the version names: the mocked HEAD and its run date.
+$env:TEXTURECRAFT_BUILD_SHA = 'a' * 40
+$env:TEXTURECRAFT_BUILD_DATE = '2026-11-21'
 function Invoke-Build([switch] $BuildOnly) {
   $arguments = @{Arch='x64';Version=$version;Target='x86_64-pc-windows-msvc';TargetDir=$root;Dist=(Join-Path $root 'dist')}
   if ($BuildOnly) { $arguments.BuildOnly = $true }
@@ -78,6 +94,11 @@ try {
   Assert-Policy ((Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash -ceq $before) 'optional stable policy changed unsigned bytes'
   Write-Output 'PASS: stable-optional-policy-preserves-owned-bytes'
 } finally {
-  Clear-SigningFixtures
+  # Put back exactly what the caller had (an unset variable is restored as unset), and drop the
+  # command mocks: a `function global:` binding outlives this script and outranks the real program.
+  foreach ($entry in $savedEnvironment) { [Environment]::SetEnvironmentVariable($entry.Name, $entry.Value) }
+  foreach ($mock in @('cargo', 'git', 'Invoke-WebRequest')) {
+    Remove-Item -LiteralPath "function:global:$mock" -ErrorAction SilentlyContinue
+  }
   Remove-Item -LiteralPath $root -Recurse -Force
 }
